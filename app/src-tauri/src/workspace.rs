@@ -12,7 +12,7 @@ use crate::prereqs::silent_command;
 
 /// TEMPLATE_REPO points the GUI repo at the files/template repo (spec 1.5).
 /// Override with the CONTEXTFUL_TEMPLATE_REPO env var for offline dev / smoke tests.
-const TEMPLATE_REPO: &str = "https://github.com/contextful/contextful-files.git";
+const TEMPLATE_REPO: &str = "https://github.com/carlhernek/contextful-files.git";
 const SYNC_PATHS: &[&str] = &["modules", "templates", "scripts", "agents"];
 
 pub const META_FILE: &str = ".contextful.json";

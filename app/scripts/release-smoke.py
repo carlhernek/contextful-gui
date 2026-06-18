@@ -48,6 +48,7 @@ def _seed_workspace(root: Path) -> Path:
     (ws / "repos" / "web").mkdir(parents=True)
     (ws / "repos" / "web" / "README.md").write_text("# Web app\n", encoding="utf-8")
     (ws / "meta").mkdir()
+    (ws / "meta" / "requirements.md").write_text("# Requirements\n", encoding="utf-8")
     (ws / "modules" / "security-analysis").mkdir(parents=True)
     return ws
 

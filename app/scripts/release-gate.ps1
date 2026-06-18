@@ -1,23 +1,6 @@
 # Contextful release gate (Windows). Phase A smoke → Phase B build → Phase C frozen sidecar smoke.
 $ErrorActionPreference = "Stop"
 $App = (Resolve-Path "$PSScriptRoot\..").Path
-$Failed = 0
-
-function Step {
-    param([string]$Name, [scriptblock]$Action)
-    Write-Host ""
-    Write-Host "=== $Name ==="
-    try {
-        & $Action
-        if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" }
-        Write-Host "OK: $Name"
-    } catch {
-        Write-Host "FAIL: $Name ($_)"
-        $script:Failed++
-    }
-}
-
-Write-Host "Contextful release gate (Phase A-C)"
 $script:Failed = 0
 
 function Step {
@@ -34,6 +17,8 @@ function Step {
         throw
     }
 }
+
+Write-Host "Contextful release gate (Phase A-C)"
 
 try {
     Step "Phase A: pre-build smoke" {

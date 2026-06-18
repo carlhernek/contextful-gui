@@ -12,7 +12,10 @@ if (-not $Version) {
 
 Write-Host "Running release gate..."
 & "$PSScriptRoot\release-gate.ps1"
-if ($LASTEXITCODE -ne 0) { exit 1 }
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Release gate failed (exit $LASTEXITCODE) — aborting publish"
+    exit $LASTEXITCODE
+}
 
 $Nsis = "$App\src-tauri\target\release\bundle\nsis\Contextful_${Version}_x64-setup.exe"
 $Msi = "$App\src-tauri\target\release\bundle\msi\Contextful_${Version}_x64_en-US.msi"

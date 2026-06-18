@@ -1,0 +1,31 @@
+[package]
+name = "contextful"
+version = "1.0.0"
+description = "Contextful — agentic project analyzer"
+authors = ["Contextful"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "contextful_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-store = "2.4.3"
+tauri-plugin-dialog = "2.7.1"
+tauri-plugin-shell = "2.3.5"
+tauri-plugin-opener = "2"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.52", features = ["full"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["clock"] }
+rand = "0.8"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

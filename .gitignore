@@ -1,0 +1,27 @@
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Rust / Tauri
+app/src-tauri/target/
+app/src-tauri/binaries/
+app/src-tauri/gen/
+
+# Python sidecar
+app/sidecar/.venv/
+app/sidecar/build/
+app/sidecar/dist/
+app/sidecar/*.spec
+__pycache__/
+*.pyc
+.pytest_cache/
+.uv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cf-bg: #0d1117;
+  --color-cf-surface: #161b22;
+  --color-cf-surface-2: #1c2330;
+  --color-cf-border: #2a3340;
+  --color-cf-ink: #e6edf3;
+  --color-cf-muted: #8b949e;
+  --color-cf-accent: #4f9cf9;
+  --color-cf-accent-ink: #0d1117;
+  --color-cf-success: #3fb950;
+  --color-cf-warning: #d29922;
+  --color-cf-danger: #f85149;
+  --color-cf-info: #58a6ff;
+
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-cf-bg);
+  color: var(--color-cf-ink);
+  font-family: var(--font-sans);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-cf-border) transparent;
+}
+
+.cf-markdown h1 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin: 1rem 0 0.5rem;
+}
+.cf-markdown h2 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin: 0.9rem 0 0.4rem;
+}
+.cf-markdown h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0.8rem 0 0.3rem;
+}
+.cf-markdown p {
+  margin: 0.5rem 0;
+  line-height: 1.6;
+}
+.cf-markdown ul {
+  list-style: disc;
+  padding-left: 1.4rem;
+  margin: 0.5rem 0;
+}
+.cf-markdown code {
+  font-family: var(--font-mono);
+  background: var(--color-cf-surface-2);
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+.cf-markdown pre {
+  background: var(--color-cf-surface-2);
+  padding: 0.8rem;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.cf-markdown table {
+  border-collapse: collapse;
+  margin: 0.6rem 0;
+}
+.cf-markdown th,
+.cf-markdown td {
+  border: 1px solid var(--color-cf-border);
+  padding: 0.3rem 0.6rem;
+}

@@ -11,7 +11,7 @@ app/
   src/                # React frontend (Vite + Tailwind v4)
   src-tauri/          # Rust core: sidecar.rs, workspace.rs, prereqs.rs, secrets.rs, settings.rs, lib.rs
   sidecar/            # Python sidecar (NDJSON server, agent loop, tools) + build.py + tests/
-  scripts/            # smoke-test.ps1 / smoke-test.sh
+  scripts/            # smoke-test, release-gate, release-smoke (frozen binary RPC matrix)
   package.json
   src-tauri/tauri.conf.json
 ```
@@ -37,21 +37,43 @@ npm run tauri dev
 
 ```bash
 cd app
-npm run build:all   # builds the sidecar binary, then the Tauri app
+npm run build:all   # rebuilds PyInstaller sidecar, then Tauri app
 ```
 
-## Smoke tests (release gate)
+`tauri build` alone is not sufficient for releases — `beforeBuildCommand` runs `build:sidecar` automatically, but always use the release gate for shipping.
+
+## Smoke tests (pre-merge)
 
 ```powershell
 # Windows
-app\scripts\smoke-test.ps1
+npm run smoke
+# or: app\scripts\smoke-test.ps1
 ```
+
 ```bash
 # macOS / Linux
 app/scripts/smoke-test.sh
 ```
 
-The NDJSON round-trip and git-worktree steps are non-negotiable gates (see spec §15).
+Covers source-sidecar tests, Rust tests, pytest (including RPC manifest), and workspace integration.
+
+## Release (mandatory gate)
+
+**Never publish without passing the release gate.** The gate runs pre-build smoke, full `build:all`, verifies the frozen sidecar binary is newer than source, and exercises the **PyInstaller binary** via NDJSON (`refresh_index`, `enrich_index_item`, `preview`).
+
+```powershell
+# Windows — gate only (no publish)
+npm run release-gate
+
+# Windows — gate + GitHub release with NSIS/MSI
+npm run release
+```
+
+```bash
+# macOS / Linux
+app/scripts/release-gate.sh
+app/scripts/release.sh
+```
 
 ## Template repo
 

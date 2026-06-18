@@ -102,6 +102,7 @@ pub fn read_index_item(project: &Path, item_id: &str) -> Result<Option<Value>> {
 mod tests {
     use super::*;
     use crate::workspace::{write_meta, ProjectMeta};
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn fixture_project() -> (tempfile::TempDir, PathBuf) {

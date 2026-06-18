@@ -175,6 +175,38 @@ async def test_server_async() -> None:
     unknown = await srv.handle({"id": "u", "method": "frobnicate"})
     check("unknown method -> error", "error" in unknown)
 
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "ws"
+        ws.mkdir()
+        (ws / ".contextful.json").write_text(
+            '{"display_name":"s","project_type":"both","repos":[{"name":"web","url":"u","branch":"main"}]}',
+            encoding="utf-8",
+        )
+        (ws / "repos" / "web").mkdir(parents=True)
+        (ws / "repos" / "web" / "README.md").write_text("# web", encoding="utf-8")
+        ws_str = str(ws)
+
+        refresh = await srv.handle({
+            "id": "ri", "method": "refresh_index",
+            "params": {"workspace": ws_str, "skipEnrichment": True},
+        })
+        check("refresh_index dispatches (not unknown method)",
+              "result" in refresh and "unknown method" not in str(refresh.get("error", "")))
+        check("refresh_index creates index file", (ws / ".workspace-index.json").exists())
+
+        enrich = await srv.handle({
+            "id": "ei", "method": "enrich_index_item",
+            "params": {"workspace": ws_str, "itemId": "repo:web"},
+        })
+        check("enrich_index_item dispatches",
+              "unknown method" not in str(enrich.get("error", "")))
+
+        preview = await srv.handle({
+            "id": "pv", "method": "preview",
+            "params": {"workspace": ws_str, "path": "README.md", "base": "repos/web"},
+        })
+        check("preview dispatches", "result" in preview and preview["result"].get("ok"))
+
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:

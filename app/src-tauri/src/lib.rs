@@ -194,8 +194,8 @@ async fn clone_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> 
         .await
         .map_err(err)?
         .map_err(err)?;
-    let _ = trigger_index_refresh(app, &state, &project_id, false).await;
-    Ok(result)
+    let index_warning = trigger_index_refresh_or_warn(app, &state, &project_id, false).await;
+    Ok(attach_index_warning(result, index_warning))
 }
 
 #[tauri::command]
@@ -212,8 +212,8 @@ async fn pull_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> C
         .await
         .map_err(err)?
         .map_err(err)?;
-    let _ = trigger_index_refresh(app, &state, &project_id, false).await;
-    Ok(result)
+    let index_warning = trigger_index_refresh_or_warn(app, &state, &project_id, false).await;
+    Ok(attach_index_warning(result, index_warning))
 }
 
 // ===== meta docs ==========================================================
@@ -226,7 +226,7 @@ async fn upload_meta_files(
 ) -> CmdResult<Vec<String>> {
     let install = install_path(&app)?;
     let uploaded = workspace::upload_meta_files(&install, &id, &sources).map_err(err)?;
-    let _ = trigger_index_refresh(app, &state, &id, false).await;
+    let _ = trigger_index_refresh_or_warn(app, &state, &id, false).await;
     Ok(uploaded)
 }
 
@@ -245,7 +245,7 @@ async fn delete_meta_entry(
 ) -> CmdResult<()> {
     let install = install_path(&app)?;
     workspace::delete_meta_entry(&install, &id, &path).map_err(err)?;
-    let _ = trigger_index_refresh(app, &state, &id, false).await;
+    let _ = trigger_index_refresh_or_warn(app, &state, &id, false).await;
     Ok(())
 }
 
@@ -393,6 +393,38 @@ async fn trigger_index_refresh(
     )
     .await?;
     Ok(())
+}
+
+async fn trigger_index_refresh_or_warn(
+    app: AppHandle,
+    state: &State<'_, AppState>,
+    project_id: &str,
+    skip_enrichment: bool,
+) -> Option<String> {
+    match trigger_index_refresh(app.clone(), state, project_id, skip_enrichment).await {
+        Ok(()) => None,
+        Err(e) => {
+            if let Ok(install) = install_path(&app) {
+                let project = workspace::project_dir(&install, project_id);
+                workspace::append_eventlog(
+                    &project,
+                    "index",
+                    "WARN",
+                    &format!("refresh_index failed: {e}"),
+                );
+            }
+            Some(e)
+        }
+    }
+}
+
+fn attach_index_warning(mut value: Value, warning: Option<String>) -> Value {
+    if let Some(w) = warning {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("indexWarning".to_string(), json!(w));
+        }
+    }
+    value
 }
 
 #[tauri::command]

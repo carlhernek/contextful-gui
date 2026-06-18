@@ -335,6 +335,7 @@ def _merge_item(
     annotations: dict[str, Any],
     cache: dict[str, Any],
     ai: dict[str, Any] | None,
+    prefer_ai: bool = False,
 ) -> dict[str, Any]:
     item_id = raw["id"]
     user = annotations.get(item_id) if isinstance(annotations.get(item_id), dict) else {}
@@ -344,7 +345,11 @@ def _merge_item(
     keywords: list[str] = []
     source = "heuristic"
 
-    if user.get("description") or user.get("keywords"):
+    if prefer_ai and ai and (ai.get("description") or ai.get("keywords")):
+        description = str(ai.get("description") or "")
+        keywords = list(ai.get("keywords") or [])
+        source = "ai"
+    elif user.get("description") or user.get("keywords"):
         if user.get("description"):
             description = str(user["description"])
         elif cached.get("description"):
@@ -418,6 +423,7 @@ async def refresh_index(
     should_cancel: CancelCheck | None = None,
     skip_enrichment: bool = False,
     force_item_ids: list[str] | None = None,
+    force_enrich: bool = False,
 ) -> dict[str, Any]:
     ws = Path(workspace)
     on_event = on_event or (lambda _e, _d: None)
@@ -446,7 +452,7 @@ async def refresh_index(
         need_enrich = (
             not skip_enrichment
             and client is not None
-            and not has_user
+            and (force_enrich or not has_user)
             and (item_id in force_set or not cache_hit)
             and enriched < ENRICH_CAP
         )
@@ -468,7 +474,13 @@ async def refresh_index(
                 "keywords": cached.get("keywords"),
             }
 
-        merged.append(_merge_item(raw, annotations=annotations, cache=cache, ai=ai))
+        merged.append(_merge_item(
+            raw,
+            annotations=annotations,
+            cache=cache,
+            ai=ai,
+            prefer_ai=force_enrich and item_id in force_set,
+        ))
 
     doc = build_index_document(ws, merged)
     _write_json_atomic(ws / INDEX_FILE, doc)
@@ -493,6 +505,7 @@ async def enrich_index_item(
         should_cancel=should_cancel,
         skip_enrichment=False,
         force_item_ids=[item_id],
+        force_enrich=True,
     )
 
 

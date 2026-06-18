@@ -891,7 +891,7 @@ pub fn pull_project_modules(install: &Path, id: &str) -> Result<Value> {
     Ok(json!({"ok": true, "version": version}))
 }
 
-fn append_eventlog(project: &Path, scope: &str, status: &str, message: &str) {
+pub fn append_eventlog(project: &Path, scope: &str, status: &str, message: &str) {
     let ts = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let line = format!("[{ts}] {scope} {status} — {message}\n");
     let _ = fs::OpenOptions::new()

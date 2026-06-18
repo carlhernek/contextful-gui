@@ -1,7 +1,7 @@
 {
   "name": "contextful",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "build:sidecar": "cd sidecar && uv run python build.py",
-    "build:all": "npm run build:sidecar && npm run tauri build"
+    "build:all": "npm run build:sidecar && npm run tauri build",
+    "smoke": "powershell -ExecutionPolicy Bypass -File scripts/smoke-test.ps1",
+    "release-gate": "powershell -ExecutionPolicy Bypass -File scripts/release-gate.ps1",
+    "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

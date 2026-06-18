@@ -9,8 +9,19 @@ interface Props {
   onClose: () => void;
 }
 
+function pathFromItemId(itemId: string): string {
+  if (itemId.startsWith("repo:")) return `repos/${itemId.slice(5)}`;
+  if (itemId.startsWith("meta:")) return `meta/${itemId.slice(5)}`;
+  if (itemId.startsWith("artifact:")) {
+    const rest = itemId.slice("artifact:".length);
+    return `runs/${rest}`;
+  }
+  return itemId;
+}
+
 export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
   const [item, setItem] = useState<IndexItem | null>(null);
+  const [missingFromIndex, setMissingFromIndex] = useState(false);
   const [description, setDescription] = useState("");
   const [keywords, setKeywords] = useState<string[]>([]);
   const [keywordInput, setKeywordInput] = useState("");
@@ -23,13 +34,19 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
     (async () => {
       setLoading(true);
       setError(null);
+      setMissingFromIndex(false);
       try {
         const found = await api.readIndexItem(projectId, itemId);
         setItem(found);
         setDescription(found.description ?? "");
         setKeywords(found.keywords ?? []);
       } catch {
-        setItem({ id: itemId, type: "unknown", path: itemId });
+        setMissingFromIndex(true);
+        setItem({
+          id: itemId,
+          type: itemId.split(":")[0] ?? "unknown",
+          path: pathFromItemId(itemId),
+        });
         setDescription("");
         setKeywords([]);
       } finally {
@@ -65,6 +82,7 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
       await api.enrichIndexItem(projectId, itemId);
       const found = await api.readIndexItem(projectId, itemId);
       setItem(found);
+      setMissingFromIndex(false);
       setDescription(found.description ?? "");
       setKeywords(found.keywords ?? []);
     } catch (e) {
@@ -77,6 +95,7 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
   if (!open) return null;
 
   const source = item?.source ?? "heuristic";
+  const displayPath = item?.path && item.path !== itemId ? item.path : pathFromItemId(itemId);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-cf-bg/70">
@@ -85,7 +104,7 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
           <div>
             <h3 className="text-lg font-semibold text-cf-ink">Index entry</h3>
             <p className="font-mono text-xs text-cf-muted">{itemId}</p>
-            {item?.path && <p className="text-xs text-cf-muted">{item.path}</p>}
+            <p className="text-xs text-cf-muted">{displayPath}</p>
           </div>
           <span className="rounded border border-cf-border px-2 py-0.5 text-xs text-cf-muted">
             {source === "user" ? "edited" : source}
@@ -98,6 +117,13 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
           </div>
         ) : (
           <div className="flex-1 space-y-3 overflow-y-auto">
+            {missingFromIndex && (
+              <p className="rounded-md border border-cf-border bg-cf-surface-2 px-3 py-2 text-xs text-cf-muted">
+                Index not built yet for this item. Use <strong>Refresh index</strong> on the
+                Repositories tab, or save a manual description below.
+              </p>
+            )}
+
             <label className="block text-xs font-medium text-cf-muted">
               Description
               <textarea

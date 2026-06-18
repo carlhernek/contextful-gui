@@ -142,3 +142,27 @@ def test_skip_enrichment_merge_only(workspace: Path):
         assert len(index["items"]) >= 1
 
     asyncio.run(run())
+
+
+def test_force_enrich_bypasses_user_guard(workspace: Path):
+    ann_path = workspace / ANNOTATIONS_FILE
+    ann_path.write_text(
+        json.dumps({"version": 1, "items": {"repo:backoffice": {"description": "User label", "keywords": ["custom"]}}}),
+        encoding="utf-8",
+    )
+    client = FakeClient()
+
+    async def run():
+        await refresh_index(
+            workspace=workspace,
+            client=client,
+            models={"module": "test/model"},
+            force_item_ids=["repo:backoffice"],
+            force_enrich=True,
+        )
+        index = json.loads((workspace / INDEX_FILE).read_text(encoding="utf-8"))
+        repo = next(i for i in index["items"] if i["id"] == "repo:backoffice")
+        assert repo["source"] == "ai"
+        assert "admin" in repo["description"].lower() or "backoffice" in repo["description"].lower()
+
+    asyncio.run(run())

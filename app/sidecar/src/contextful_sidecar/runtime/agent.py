@@ -9,6 +9,7 @@ from contextful_sidecar.runtime.activity import append_activity
 from contextful_sidecar.runtime.agents import compose_module_prompt
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
+from contextful_sidecar.runtime.step_log import log_step, logged_chat_completion
 from contextful_sidecar.runtime.tool_runner import run_tool_with_liveness
 from contextful_sidecar.runtime.tools import (
     TOOL_DEFINITIONS,
@@ -96,11 +97,28 @@ async def run_agent(
         turn += 1
         if on_event:
             on_event("turn", {"module": module_id, "turn": turn, "maxTurns": max_turns})
-        append_eventlog(workspace, module_id, "TURN", f"turn {turn}/{max_turns}")
-        append_activity(workspace, run_id, module_id, "turn", turn=turn, maxTurns=max_turns)
+        log_step(
+            workspace,
+            scope=module_id,
+            status="TURN",
+            message=f"turn {turn}/{max_turns}",
+            run_id=run_id,
+            module_id=module_id,
+            activity_kind="turn",
+            turn=turn,
+            maxTurns=max_turns,
+        )
 
-        response = await client.chat_completion(
-            model=model, messages=messages, tools=TOOL_DEFINITIONS, on_token=on_token,
+        response = await logged_chat_completion(
+            workspace=workspace,
+            run_id=run_id,
+            module_id=module_id,
+            scope=module_id,
+            client=client,
+            model=model,
+            messages=messages,
+            tools=TOOL_DEFINITIONS,
+            on_token=on_token,
         )
         message = response["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
@@ -127,10 +145,20 @@ async def run_agent(
                 args = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
-            append_eventlog(workspace, module_id, "TOOL", f"{name} {json.dumps(args)[:160]}")
+            log_step(
+                workspace,
+                scope=module_id,
+                status="TOOL",
+                message=f"{name} {json.dumps(args)[:160]}",
+                run_id=run_id,
+                module_id=module_id,
+                activity_kind="tool",
+                turn=turn,
+                name=name,
+                args=args,
+            )
             if on_event:
                 on_event("tool", {"name": name, "args": args})
-            append_activity(workspace, run_id, module_id, "tool", turn=turn, name=name, args=args)
             result = await run_tool_with_liveness(
                 workspace=workspace,
                 log_scope=module_id,
@@ -150,9 +178,17 @@ async def run_agent(
 
         if _turn_was_only_failed_fetch(tool_calls, results) and fetch_refunds < MAX_FETCH_REFUNDS:
             fetch_refunds += 1
-            turn -= 1  # refund: transient network failures shouldn't burn the budget
+            turn -= 1
 
     err = f"{role} stopped after {max_turns} turns (incomplete)"
-    append_eventlog(workspace, module_id, "ERROR", f"stopped after {max_turns} turns")
-    append_activity(workspace, run_id, module_id, "error", text=err)
+    log_step(
+        workspace,
+        scope=module_id,
+        status="ERROR",
+        message=err,
+        run_id=run_id,
+        module_id=module_id,
+        activity_kind="error",
+        turn=turn,
+    )
     return err

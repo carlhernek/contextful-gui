@@ -51,9 +51,16 @@ class SidecarServer:
 
     # --- events -----------------------------------------------------------
     def _emit_event(self, req_id: str | None, event: str, data: Any) -> None:
-        # No-op once cancelled -> prevents post-cancel event noise in the UI.
+        # Suppress non-terminal noise after cancel, but always allow run/module
+        # terminal events so the UI can leave "running" state.
         if self.should_cancel():
-            return
+            if event not in ("run", "module"):
+                return
+            if isinstance(data, dict):
+                status = data.get("status")
+                terminal = {"complete", "failed", "cancelled", "SUCCESS", "ERROR"}
+                if status not in terminal:
+                    return
         _write_json({"id": req_id, "event": event, "data": data})
 
     # --- configuration ----------------------------------------------------
@@ -95,6 +102,7 @@ class SidecarServer:
                     project_type=params.get("projectType", "both"),
                     resume=params.get("resume", True), force=params.get("force", False),
                     specific_instructions=params.get("specific_instructions"),
+                    app_version=params.get("appVersion", "unknown"),
                     on_event=lambda ev, data: self._emit_event(req_id, ev, data),
                     should_cancel=self.should_cancel,
                 )

@@ -1,16 +1,19 @@
 """Workspace index: scan repos/meta/artefacts, LLM-enrich, merge user annotations."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
+from contextful_sidecar.runtime.step_log import log_step
 from contextful_sidecar.runtime.tools import _git_env, _list_directory, _read_file, _silent_run
 
 INDEX_FILE = ".workspace-index.json"
@@ -537,10 +540,33 @@ async def agentic_reindex(
     models = models or {}
     model = models.get("module") or models.get("orchestrator") or "deepseek/deepseek-v4-flash"
 
-    raw_items = scan_items(ws)
+    log_step(
+        ws,
+        scope=MODULE_ID,
+        status="SCAN_START",
+        message="scanning workspace items",
+        run_id=run_id,
+        module_id=MODULE_ID,
+        activity_kind="scan_start",
+    )
+    scan_t0 = time.monotonic()
+    raw_items = await asyncio.to_thread(scan_items, ws)
+    scan_ms = int((time.monotonic() - scan_t0) * 1000)
+    total = len(raw_items)
+    log_step(
+        ws,
+        scope=MODULE_ID,
+        status="SCAN_DONE",
+        message=f"{total} items in {scan_ms}ms",
+        run_id=run_id,
+        module_id=MODULE_ID,
+        activity_kind="scan_done",
+        itemCount=total,
+        durationMs=scan_ms,
+    )
+
     annotations = load_annotations(ws)
     cache = load_cache(ws)
-    total = len(raw_items)
 
     append_eventlog(ws, MODULE_ID, "ENUMERATE", f"{total} items")
     on_event("index", {"phase": "enumerate", "total": total, "module": MODULE_ID})
@@ -570,6 +596,18 @@ async def agentic_reindex(
         item_id = raw["id"]
         if _item_already_indexed(raw, annotations=annotations, cache=cache):
             skipped += 1
+            log_step(
+                ws,
+                scope=MODULE_ID,
+                status="CACHE_HIT",
+                message=f"{item_id} ({idx}/{total})",
+                run_id=run_id,
+                module_id=MODULE_ID,
+                activity_kind="cache_hit",
+                itemId=item_id,
+                itemIndex=idx,
+                itemTotal=total,
+            )
             on_event(
                 "index",
                 {
@@ -593,6 +631,31 @@ async def agentic_reindex(
             )
             continue
 
+        log_step(
+            ws,
+            scope=MODULE_ID,
+            status="CACHE_MISS",
+            message=f"{item_id} ({idx}/{total})",
+            run_id=run_id,
+            module_id=MODULE_ID,
+            activity_kind="cache_miss",
+            itemId=item_id,
+            itemIndex=idx,
+            itemTotal=total,
+        )
+        log_step(
+            ws,
+            scope=MODULE_ID,
+            status="INDEX_START",
+            message=f"{item_id} ({idx}/{total}) path={raw.get('path', '')}",
+            run_id=run_id,
+            module_id=MODULE_ID,
+            activity_kind="index_start",
+            itemId=item_id,
+            itemIndex=idx,
+            itemTotal=total,
+            path=raw.get("path"),
+        )
         on_event(
             "index",
             {
@@ -660,6 +723,20 @@ async def agentic_reindex(
                 "total": total,
                 "module": MODULE_ID,
             },
+        )
+        log_step(
+            ws,
+            scope=MODULE_ID,
+            status="INDEX_DONE",
+            message=f"{item_id} source=ai ({idx}/{total})",
+            run_id=run_id,
+            module_id=MODULE_ID,
+            activity_kind="index_done",
+            itemId=item_id,
+            itemIndex=idx,
+            itemTotal=total,
+            description=ai.get("description"),
+            source="ai",
         )
         append_activity(
             ws,

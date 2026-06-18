@@ -22,10 +22,30 @@ export function parseEventLog(text: string): EventLogEntry[] {
   return out;
 }
 
-export type LogFilter = "ALL" | "Ops" | "TURN" | "ERROR" | "TOOL";
+export type LogFilter = "ALL" | "Ops" | "TURN" | "ERROR" | "TOOL" | "LLM" | "INDEX" | "STATE";
 
-const OPS_STATUSES = new Set(["START", "SUCCESS", "CANCELLED", "RETRY", "RESUME", "SKIP", "WARN"]);
+const OPS_STATUSES = new Set([
+  "START",
+  "SUCCESS",
+  "CANCELLED",
+  "RETRY",
+  "RESUME",
+  "SKIP",
+  "WARN",
+  "ENUMERATE",
+  "SCAN_START",
+  "SCAN_DONE",
+]);
 const OPS_SCOPES = new Set(["job", "git", "index", "gui", "run", "modules"]);
+const INDEX_STATUSES = new Set([
+  "ENUMERATE",
+  "SCAN_START",
+  "SCAN_DONE",
+  "INDEX_START",
+  "INDEX_DONE",
+  "CACHE_HIT",
+  "CACHE_MISS",
+]);
 
 export function filterEntries(entries: EventLogEntry[], filter: LogFilter): EventLogEntry[] {
   if (filter === "ALL") return entries;
@@ -39,8 +59,20 @@ export function filterEntries(entries: EventLogEntry[], filter: LogFilter): Even
         return e.status === "ERROR";
       case "TOOL":
         return e.status === "TOOL" || e.status === "TOOL_DONE";
+      case "LLM":
+        return e.status === "LLM_REQUEST" || e.status === "LLM_RESPONSE";
+      case "INDEX":
+        return INDEX_STATUSES.has(e.status) || e.scope === "workspace-index";
+      case "STATE":
+        return e.status === "STATE";
       default:
         return true;
     }
   });
+}
+
+/** Keep only the last N parsed lines for snappy UI rendering. */
+export function tailEventLog(entries: EventLogEntry[], maxLines = 2000): EventLogEntry[] {
+  if (entries.length <= maxLines) return entries;
+  return entries.slice(-maxLines);
 }

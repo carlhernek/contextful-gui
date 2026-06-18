@@ -43,7 +43,12 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
     if (!runId) return;
     let unlisten: (() => void) | undefined;
     onContextfulEvent((e) => {
-      if (e.event === "module" || e.event === "run") {
+      if (
+        e.event === "module" ||
+        e.event === "run" ||
+        e.event === "index" ||
+        e.event === "activity"
+      ) {
         void loadArtifacts(runId);
       }
     }).then((fn) => (unlisten = fn));

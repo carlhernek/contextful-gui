@@ -55,7 +55,10 @@ def test_agentic_reindex_enumerates_and_enriches():
             assert result["enriched"] >= 1
             index = json.loads((ws / INDEX_FILE).read_text(encoding="utf-8"))
             assert any(i.get("status") == "done" for i in index["items"])
+            log = (ws / ".eventlog").read_text(encoding="utf-8")
             assert any(ev == "index" and (d := data).get("phase") == "enumerate" for ev, data in events)
+            assert "SCAN_START" in log
+            assert "SCAN_DONE" in log
             activity = read_activity(ws, "idx-run", MODULE_ID)
             assert any(a["kind"] == "item" for a in activity)
 
@@ -93,6 +96,8 @@ def test_agentic_reindex_skips_cached_items():
                 models={"module": "test/model"},
             )
             assert result["skipped"] >= 1
+            log = (ws / ".eventlog").read_text(encoding="utf-8")
+            assert "CACHE_HIT" in log
             index = json.loads((ws / INDEX_FILE).read_text(encoding="utf-8"))
             notes = next(i for i in index["items"] if i["id"] == "meta:notes.md")
             assert notes["description"] == "existing"

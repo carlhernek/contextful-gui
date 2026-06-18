@@ -18,6 +18,8 @@ use tauri_plugin_dialog::DialogExt;
 
 use sidecar::SidecarManager;
 
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub struct AppState {
     pub sidecar: Arc<SidecarManager>,
     pub jobs: Arc<JobManager>,
@@ -667,15 +669,19 @@ async fn start_run(
             "force": force,
             "resume": resume,
             "specific_instructions": specific_instructions,
+            "appVersion": APP_VERSION,
         }),
     )
     .await;
     match &result {
         Err(e) => {
+            let _ = workspace::set_run_status(&install, &id, &run_id, "cancelled");
             guard.fail_with("run", &format!("run_modules RPC failed — {e}"));
         }
         Ok(v) => match v.get("status").and_then(|s| s.as_str()) {
             Some("failed") | Some("cancelled") => {
+                let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("failed");
+                let _ = workspace::set_run_status(&install, &id, &run_id, status);
                 guard.fail();
             }
             _ => {}

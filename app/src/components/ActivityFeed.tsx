@@ -17,6 +17,8 @@ interface Props {
   live?: boolean;
 }
 
+const MAX_VISIBLE_ENTRIES = 1000;
+
 function entryKey(e: ActivityEntry, idx: number): string {
   return `${e.seq ?? idx}-${e.kind}-${e.turn ?? ""}-${e.itemId ?? ""}-${e.name ?? ""}`;
 }
@@ -103,6 +105,7 @@ export function ActivityFeed({ projectId, runId, moduleId, live = true }: Props)
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [streamingText, setStreamingText] = useState("");
+  const [showAll, setShowAll] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const liveTurnRef = useRef<number | null>(null);
 
@@ -137,7 +140,7 @@ export function ActivityFeed({ projectId, runId, moduleId, live = true }: Props)
         }
         return;
       }
-      if (e.event === "run") {
+      if (e.event === "run" || e.event === "activity" || e.event === "index") {
         void reload();
         return;
       }
@@ -203,8 +206,10 @@ export function ActivityFeed({ projectId, runId, moduleId, live = true }: Props)
   }
 
   const hasStreaming = streamingText.length > 0;
+  const truncated = !showAll && entries.length > MAX_VISIBLE_ENTRIES;
+  const visibleEntries = truncated ? entries.slice(-MAX_VISIBLE_ENTRIES) : entries;
   const isIndexModule = moduleId === "workspace-index";
-  const groups = isIndexModule ? groupByItem(entries) : null;
+  const groups = isIndexModule ? groupByItem(visibleEntries) : null;
 
   if (entries.length === 0 && !hasStreaming) {
     return (
@@ -216,6 +221,15 @@ export function ActivityFeed({ projectId, runId, moduleId, live = true }: Props)
 
   return (
     <div className="space-y-4 pb-4">
+      {truncated && (
+        <button
+          type="button"
+          className="text-xs text-cf-info hover:underline"
+          onClick={() => setShowAll(true)}
+        >
+          Show all {entries.length} entries (showing last {MAX_VISIBLE_ENTRIES})
+        </button>
+      )}
       {groups ? (
         [...groups.entries()].map(([itemId, itemEntries]) => {
           const first = itemEntries[0];
@@ -242,7 +256,7 @@ export function ActivityFeed({ projectId, runId, moduleId, live = true }: Props)
         })
       ) : (
         <div className="space-y-2">
-          {entries.map((entry, i) => (
+          {visibleEntries.map((entry, i) => (
             <FeedEntry key={entryKey(entry, i)} entry={entry} />
           ))}
         </div>

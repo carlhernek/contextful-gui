@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from contextful_sidecar.runtime.activity import append_activity
-from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.indexing import (
     _heuristic_description,
     _heuristic_keywords,
     _parse_enrichment,
 )
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
+from contextful_sidecar.runtime.step_log import log_step, logged_chat_completion
 from contextful_sidecar.runtime.tool_runner import run_tool_with_liveness
 from contextful_sidecar.runtime.tools import INDEX_TOOL_DEFINITIONS, execute_tool
 
@@ -88,22 +88,30 @@ async def index_item(
             break
         turn += 1
         on_event("turn", {"module": MODULE_ID, "turn": turn, "maxTurns": max_turns, **event_extra})
-        append_eventlog(workspace, MODULE_ID, "TURN", f"{item_id} turn {turn}/{max_turns}")
-        append_activity(
+        log_step(
             workspace,
-            run_id,
-            MODULE_ID,
-            "turn",
+            scope=MODULE_ID,
+            status="TURN",
+            message=f"{item_id} turn {turn}/{max_turns}",
+            run_id=run_id,
+            module_id=MODULE_ID,
+            activity_kind="turn",
             turn=turn,
             maxTurns=max_turns,
             **event_extra,
         )
 
-        response = await client.chat_completion(
+        response = await logged_chat_completion(
+            workspace=workspace,
+            run_id=run_id,
+            module_id=MODULE_ID,
+            scope=MODULE_ID,
+            client=client,
             model=model,
             messages=messages,
             tools=INDEX_TOOL_DEFINITIONS,
             on_token=on_token,
+            event_extra=event_extra,
         )
         message = response["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
@@ -152,23 +160,20 @@ async def index_item(
                 args = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
-            append_eventlog(
+            log_step(
                 workspace,
-                MODULE_ID,
-                "TOOL",
-                f"{item_id} {name} {json.dumps(args)[:160]}",
-            )
-            on_event("tool", {"name": name, "args": args, **event_extra})
-            append_activity(
-                workspace,
-                run_id,
-                MODULE_ID,
-                "tool",
+                scope=MODULE_ID,
+                status="TOOL",
+                message=f"{item_id} {name} {json.dumps(args)[:160]}",
+                run_id=run_id,
+                module_id=MODULE_ID,
+                activity_kind="tool",
                 turn=turn,
                 name=name,
                 args=args,
                 **event_extra,
             )
+            on_event("tool", {"name": name, "args": args, **event_extra})
             result = await run_tool_with_liveness(
                 workspace=workspace,
                 log_scope=MODULE_ID,
@@ -189,7 +194,16 @@ async def index_item(
             })
 
     err = f"index agent stopped after {max_turns} turns for {item_id}"
-    append_activity(workspace, run_id, MODULE_ID, "error", text=err, **event_extra)
+    log_step(
+        workspace,
+        scope=MODULE_ID,
+        status="ERROR",
+        message=err,
+        run_id=run_id,
+        module_id=MODULE_ID,
+        activity_kind="error",
+        **event_extra,
+    )
     return {
         "description": _heuristic_description(
             item["type"], item.get("name", ""), item.get("snippet") or ""

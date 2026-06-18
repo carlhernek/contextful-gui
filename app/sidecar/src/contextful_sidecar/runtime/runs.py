@@ -11,6 +11,7 @@ from contextful_sidecar.runtime.agent import run_agent
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.indexing import agentic_reindex
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
+from contextful_sidecar.runtime.step_log import log_step
 
 EventCallback = Callable[[str, Any], None]
 CancelCheck = Callable[[], bool]
@@ -54,10 +55,20 @@ def load_run_state(workspace: Path, run_id: str) -> dict[str, Any]:
 
 
 def save_run_state(workspace: Path, run_id: str, **updates: Any) -> dict[str, Any]:
-    state = load_run_state(workspace, run_id)
+    prev = load_run_state(workspace, run_id)
+    state = dict(prev)
     state.update(updates)
     state["runId"] = run_id
     state["updatedAt"] = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    new_status = state.get("status")
+    old_status = prev.get("status")
+    if new_status and new_status != old_status:
+        append_eventlog(
+            workspace,
+            "run",
+            "STATE",
+            f"runId={run_id} {old_status or 'idle'} -> {new_status}",
+        )
     path = _state_path(workspace, run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -128,25 +139,35 @@ def _list_meta_docs(workspace: Path) -> list[Path]:
     return out
 
 
-# --- orchestration --------------------------------------------------------
-async def run_modules(
+def _cancel_run(
+    ws: Path,
+    run_id: str,
     *,
-    workspace: str,
+    app_version: str,
+    completed: list[str],
+    on_event: EventCallback,
+) -> dict[str, Any]:
+    save_run_state(ws, run_id, status="cancelled")
+    append_eventlog(ws, "run", "CANCELLED", f"runId={run_id} app=v{app_version}")
+    on_event("run", {"runId": run_id, "status": "cancelled", "completedModules": completed})
+    return {"runId": run_id, "status": "cancelled", "completedModules": completed}
+
+
+async def _run_modules_body(
+    *,
+    ws: Path,
     client: OpenRouterClient,
     models: dict[str, str],
     run_id: str,
     modules: list[str],
-    project_type: str = "both",
-    resume: bool = True,
-    force: bool = False,
-    specific_instructions: str | None = None,
-    on_event: EventCallback | None = None,
-    should_cancel: CancelCheck | None = None,
+    project_type: str,
+    resume: bool,
+    force: bool,
+    specific_instructions: str | None,
+    on_event: EventCallback,
+    should_cancel: CancelCheck,
+    app_version: str,
 ) -> dict[str, Any]:
-    ws = Path(workspace)
-    should_cancel = should_cancel or (lambda: False)
-    on_event = on_event or (lambda ev, data: None)
-
     version = template_version(ws)
     plan = filter_modules(ws, run_id, modules, resume, force)
     to_run = plan["to_run"]
@@ -154,7 +175,12 @@ async def run_modules(
         return {"runId": run_id, "status": "complete", "completedModules":
                 load_run_state(ws, run_id).get("completedModules", []), "alreadyComplete": True}
 
-    append_eventlog(ws, "run", "START", f"runId={run_id} modules={version} ({len(to_run)} to run)")
+    append_eventlog(
+        ws,
+        "run",
+        "START",
+        f"runId={run_id} app=v{app_version} modules={version} ({len(to_run)} to run)",
+    )
     state = save_run_state(ws, run_id, status="running", error=None, failedModule=None)
     completed = list(state.get("completedModules", []))
     on_event("run", {"runId": run_id, "status": "running", "completedModules": completed})
@@ -164,10 +190,7 @@ async def run_modules(
 
     for module_id in to_run:
         if should_cancel():
-            save_run_state(ws, run_id, status="cancelled")
-            append_eventlog(ws, "run", "CANCELLED", f"runId={run_id}")
-            on_event("run", {"runId": run_id, "status": "cancelled", "completedModules": completed})
-            return {"runId": run_id, "status": "cancelled", "completedModules": completed}
+            return _cancel_run(ws, run_id, app_version=app_version, completed=completed, on_event=on_event)
 
         skill = _module_skill(ws, module_id)
         role = _role_for(module_id)
@@ -182,7 +205,7 @@ async def run_modules(
                     "completedModules": completed}
 
         on_event("module", {"module": module_id, "status": "START"})
-        append_eventlog(ws, module_id, "START", f"modules={version}")
+        append_eventlog(ws, module_id, "START", f"modules={version} app=v{app_version}")
 
         if module_id == WORKSPACE_INDEX_MODULE:
             summary, error = await _run_workspace_index(
@@ -202,11 +225,8 @@ async def run_modules(
                 on_event=on_event, should_cancel=should_cancel,
             )
 
-        if should_cancel():
-            save_run_state(ws, run_id, status="cancelled")
-            append_eventlog(ws, "run", "CANCELLED", f"runId={run_id}")
-            on_event("run", {"runId": run_id, "status": "cancelled", "completedModules": completed})
-            return {"runId": run_id, "status": "cancelled", "completedModules": completed}
+        if should_cancel() or error == "cancelled":
+            return _cancel_run(ws, run_id, app_version=app_version, completed=completed, on_event=on_event)
 
         if error is not None:
             append_eventlog(ws, module_id, "ERROR", error)
@@ -227,6 +247,56 @@ async def run_modules(
     _write_run_summary(ws, run_id, completed, project_type, version)
     on_event("run", {"runId": run_id, "status": "complete", "completedModules": completed})
     return {"runId": run_id, "status": "complete", "completedModules": completed}
+
+
+# --- orchestration --------------------------------------------------------
+async def run_modules(
+    *,
+    workspace: str,
+    client: OpenRouterClient,
+    models: dict[str, str],
+    run_id: str,
+    modules: list[str],
+    project_type: str = "both",
+    resume: bool = True,
+    force: bool = False,
+    specific_instructions: str | None = None,
+    on_event: EventCallback | None = None,
+    should_cancel: CancelCheck | None = None,
+    app_version: str = "unknown",
+) -> dict[str, Any]:
+    ws = Path(workspace)
+    should_cancel = should_cancel or (lambda: False)
+    on_event = on_event or (lambda ev, data: None)
+
+    try:
+        return await _run_modules_body(
+            ws=ws,
+            client=client,
+            models=models,
+            run_id=run_id,
+            modules=modules,
+            project_type=project_type,
+            resume=resume,
+            force=force,
+            specific_instructions=specific_instructions,
+            on_event=on_event,
+            should_cancel=should_cancel,
+            app_version=app_version,
+        )
+    except asyncio.CancelledError:
+        completed = load_run_state(ws, run_id).get("completedModules", [])
+        save_run_state(ws, run_id, status="cancelled")
+        append_eventlog(ws, "run", "CANCELLED", f"runId={run_id} app=v{app_version} (task cancelled)")
+        on_event("run", {"runId": run_id, "status": "cancelled", "completedModules": completed})
+        raise
+    except Exception as exc:
+        completed = load_run_state(ws, run_id).get("completedModules", [])
+        err = str(exc)
+        save_run_state(ws, run_id, status="failed", error=err)
+        append_eventlog(ws, "run", "ERROR", f"runId={run_id} unhandled: {err}")
+        on_event("run", {"runId": run_id, "status": "failed", "completedModules": completed, "error": err})
+        raise
 
 
 async def _run_workspace_index(
@@ -273,7 +343,6 @@ async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, r
                 project_type=project_type, specific_instructions=specific_instructions,
                 on_event=on_event,
             )
-            # The agent returns a sentinel string on turn exhaustion; treat as transient error.
             if summary.endswith("(incomplete)"):
                 raise RuntimeError(summary)
             return summary, None

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, onContextfulEvent } from "../lib/ipc";
-import { parseEventLog, filterEntries, type LogFilter } from "../lib/eventLog";
+import { parseEventLog, filterEntries, tailEventLog, type LogFilter } from "../lib/eventLog";
 import { eventLogLineClass } from "../lib/statusStyles";
 
-const FILTERS: LogFilter[] = ["ALL", "Ops", "TURN", "ERROR", "TOOL"];
+const FILTERS: LogFilter[] = ["ALL", "Ops", "TURN", "LLM", "TOOL", "INDEX", "STATE", "ERROR"];
 const REFRESH_MS = 10_000;
 const STICKY_THRESHOLD_PX = 48;
+const TAIL_LINES = 2000;
 
 export function EventLogPanel({ projectId }: { projectId: string }) {
   const [text, setText] = useState("");
@@ -22,7 +23,13 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
     const t = setInterval(() => void refresh(), REFRESH_MS);
     let unlisten: (() => void) | undefined;
     onContextfulEvent((e) => {
-      if (e.event === "job" || e.event === "run" || e.event === "module" || e.event === "index") {
+      if (
+        e.event === "job" ||
+        e.event === "run" ||
+        e.event === "module" ||
+        e.event === "index" ||
+        e.event === "activity"
+      ) {
         void refresh();
       }
     }).then((fn) => {
@@ -34,7 +41,8 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
     };
   }, [refresh]);
 
-  const entries = filterEntries(parseEventLog(text), filter);
+  const entries = filterEntries(tailEventLog(parseEventLog(text), TAIL_LINES), filter);
+  const truncated = parseEventLog(text).length > TAIL_LINES;
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -54,7 +62,7 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
   return (
     <div className="flex h-full flex-col rounded-lg border border-cf-border bg-cf-surface">
       <div className="flex items-center justify-between border-b border-cf-border px-3 py-2">
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1">
           {FILTERS.map((f) => (
             <button
               key={f}
@@ -76,6 +84,11 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
           copy
         </button>
       </div>
+      {truncated && (
+        <div className="border-b border-cf-border px-3 py-1 text-[10px] text-cf-muted">
+          Showing last {TAIL_LINES} lines
+        </div>
+      )}
       <div
         ref={scrollRef}
         onScroll={onScroll}

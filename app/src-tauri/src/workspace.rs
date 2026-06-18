@@ -20,6 +20,7 @@ pub const RUN_STATE_DIR: &str = "runs";
 #[allow(dead_code)] // reserved for orchestrator chat persistence (spec 8.1)
 pub const CHATLOG_FILE: &str = ".chatlog.json";
 pub const TEMPLATE_VERSION_FILE: &str = "modules/template-version.txt";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn template_repo_url() -> String {
     std::env::var("CONTEXTFUL_TEMPLATE_REPO").unwrap_or_else(|_| TEMPLATE_REPO.to_string())
@@ -973,6 +974,43 @@ pub fn get_run_log(install: &Path, id: &str, run_id: &str) -> String {
         .join("\n")
 }
 
+/// Belt-and-suspenders: persist terminal run status when the sidecar RPC fails or returns cancelled.
+pub fn set_run_status(install: &Path, id: &str, run_id: &str, status: &str) -> Result<()> {
+    let project = project_dir(install, id);
+    let run_dir = project.join(RUN_STATE_DIR).join(run_id);
+    if !run_dir.is_dir() {
+        bail!("run directory missing");
+    }
+    let state_path = run_dir.join(".run-state.json");
+    let mut state = fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or_else(|| json!({"runId": run_id, "status": "idle", "completedModules": []}));
+    let prev = state
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("idle")
+        .to_string();
+    if prev == status {
+        return Ok(());
+    }
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("status".into(), json!(status));
+        obj.insert(
+            "updatedAt".into(),
+            json!(chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        );
+    }
+    fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
+    append_eventlog(
+        &project,
+        "run",
+        "STATE",
+        &format!("runId={run_id} {prev} -> {status} (gui fallback)"),
+    );
+    Ok(())
+}
+
 pub fn list_runs(install: &Path, id: &str) -> Vec<Value> {
     let runs_dir = project_dir(install, id).join(RUN_STATE_DIR);
     let mut out = Vec::new();
@@ -1109,10 +1147,15 @@ pub fn get_modules_version_status(install: &Path, id: &str, fetch: bool) -> Resu
         let (log_status, detail) = if update_available {
             (
                 "WARN",
-                format!("v{local} installed — v{remote} available (update recommended)"),
+                format!(
+                    "app v{APP_VERSION} — modules v{local} installed — v{remote} available (update recommended)"
+                ),
             )
         } else {
-            ("SUCCESS", format!("v{local} up to date (remote v{remote})"))
+            (
+                "SUCCESS",
+                format!("app v{APP_VERSION} — modules v{local} up to date (remote v{remote})"),
+            )
         };
         append_eventlog(&project, "modules", log_status, &detail);
     }

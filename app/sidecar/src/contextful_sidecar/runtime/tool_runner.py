@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,11 +18,12 @@ HEARTBEAT_INTERVAL_SEC = 15.0
 TOOL_RESULT_CAP = 4000
 
 
-def _tool_done_summary(name: str, result: str) -> str:
+def _tool_done_summary(name: str, result: str, duration_ms: int) -> str:
     head = result.splitlines()[0] if result else ""
-    if len(head) > 160:
-        head = head[:160] + "…"
-    return f"{name}: {head}"
+    if len(head) > 120:
+        head = head[:120] + "…"
+    size = len(result.encode("utf-8", errors="replace"))
+    return f"{name}: {head} ({size} bytes, {duration_ms}ms)"
 
 
 def _cap_result(result: str, cap: int = TOOL_RESULT_CAP) -> str:
@@ -64,11 +66,13 @@ async def run_tool_with_liveness(
 
     hb = asyncio.create_task(heartbeat())
     executor = tool_executor or execute_tool
+    t0 = time.monotonic()
     try:
         result = await asyncio.to_thread(executor, workspace, name, args)
     except Exception as exc:  # noqa: BLE001
         result = f"ERROR: {exc}"
     finally:
+        duration_ms = int((time.monotonic() - t0) * 1000)
         stop_heartbeat.set()
         hb.cancel()
         try:
@@ -76,11 +80,23 @@ async def run_tool_with_liveness(
         except asyncio.CancelledError:
             pass
 
-    append_eventlog(workspace, log_scope, "TOOL_DONE", _tool_done_summary(name, result))
+    append_eventlog(
+        workspace,
+        log_scope,
+        "TOOL_DONE",
+        _tool_done_summary(name, result, duration_ms),
+    )
     if on_event:
         on_event(
             "activity",
-            {"module": log_scope, "kind": "tool_done", "name": name, "turn": turn, **extra},
+            {
+                "module": log_scope,
+                "kind": "tool_done",
+                "name": name,
+                "turn": turn,
+                "durationMs": duration_ms,
+                **extra,
+            },
         )
     if run_id and module_id:
         append_activity(
@@ -91,6 +107,8 @@ async def run_tool_with_liveness(
             turn=turn,
             name=name,
             result=_cap_result(result),
+            durationMs=duration_ms,
+            resultBytes=len(result.encode("utf-8", errors="replace")),
             **{k: v for k, v in extra.items() if k in ("itemId", "itemIndex", "itemTotal")},
         )
     return result

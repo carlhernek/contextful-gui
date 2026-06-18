@@ -1028,16 +1028,56 @@ fn parse_semver(s: &str) -> (u64, u64, u64) {
     )
 }
 
+/// Resolve the template remote's default branch (e.g. `master` or `main`).
+/// The files repo historically used `master`, so hardcoding `main` silently
+/// breaks version checks and module pulls. Detect it instead of assuming.
+fn template_default_branch(template: &Path) -> String {
+    if let Ok(out) = git_run(
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        template,
+    ) {
+        if let Some(branch) = out.trim().strip_prefix("origin/") {
+            if !branch.is_empty() {
+                return branch.to_string();
+            }
+        }
+    }
+    for cand in ["main", "master"] {
+        if git_run(&["rev-parse", "--verify", &format!("origin/{cand}")], template).is_ok() {
+            return cand.to_string();
+        }
+    }
+    "main".to_string()
+}
+
 pub fn get_modules_version_status(install: &Path, id: &str, fetch: bool) -> Result<Value> {
     let project = project_dir(install, id);
     let template = install.join("template");
     let local = read_template_version(&project);
     if fetch {
-        let _ = git_run(&["fetch", "origin", "main"], &template);
+        if let Err(e) = git_run(&["fetch", "origin"], &template) {
+            append_eventlog(
+                &project,
+                "modules",
+                "ERROR",
+                &format!("fetch failed during version check: {e}"),
+            );
+        }
     }
-    let remote = git_run(&["show", "origin/main:modules/template-version.txt"], &template)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| local.clone());
+    let branch = template_default_branch(&template);
+    let remote_ref = format!("origin/{branch}:modules/template-version.txt");
+    let remote = match git_run(&["show", &remote_ref], &template) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            append_eventlog(
+                &project,
+                "modules",
+                "ERROR",
+                &format!("could not read remote module version ({remote_ref}): {e}"),
+            );
+            local.clone()
+        }
+    };
     let update_available = parse_semver(&remote) > parse_semver(&local);
     if fetch {
         let (log_status, detail) = if update_available {
@@ -1056,11 +1096,32 @@ pub fn get_modules_version_status(install: &Path, id: &str, fetch: bool) -> Resu
 pub fn pull_project_modules(install: &Path, id: &str) -> Result<Value> {
     let project = project_dir(install, id);
     let template = install.join("template");
-    git_run(&["fetch", "origin", "main"], &template).context("fetch template")?;
-    git_run(&["merge", "--ff-only", "origin/main"], &template).context("ff-merge template")?;
-    let mut checkout = vec!["checkout", "origin/main", "--"];
+    if let Err(e) = git_run(&["fetch", "origin"], &template) {
+        append_eventlog(&project, "modules", "ERROR", &format!("fetch failed: {e}"));
+        return Err(e).context("fetch template");
+    }
+    let branch = template_default_branch(&template);
+    let origin_ref = format!("origin/{branch}");
+    if let Err(e) = git_run(&["merge", "--ff-only", &origin_ref], &template) {
+        append_eventlog(
+            &project,
+            "modules",
+            "ERROR",
+            &format!("ff-merge {origin_ref} failed: {e}"),
+        );
+        return Err(e).context("ff-merge template");
+    }
+    let mut checkout = vec!["checkout", origin_ref.as_str(), "--"];
     checkout.extend_from_slice(SYNC_PATHS);
-    git_run(&checkout, &project).context("checkout synced paths into project")?;
+    if let Err(e) = git_run(&checkout, &project) {
+        append_eventlog(
+            &project,
+            "modules",
+            "ERROR",
+            &format!("checkout synced paths failed: {e}"),
+        );
+        return Err(e).context("checkout synced paths into project");
+    }
     let version = read_template_version(&project);
     append_eventlog(&project, "gui", "SUCCESS", &format!("pulled modules -> v{version}"));
     Ok(json!({"ok": true, "version": version}))

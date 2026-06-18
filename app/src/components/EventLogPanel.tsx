@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { api } from "../lib/ipc";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, onContextfulEvent } from "../lib/ipc";
 import { parseEventLog, filterEntries, type LogFilter } from "../lib/eventLog";
 import { eventLogLineClass } from "../lib/statusStyles";
 
@@ -13,14 +13,26 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
-  const refresh = async () => setText(await api.getEventLog(projectId));
+  const refresh = useCallback(async () => {
+    setText(await api.getEventLog(projectId));
+  }, [projectId]);
 
   useEffect(() => {
     void refresh();
-    const t = setInterval(refresh, REFRESH_MS);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+    const t = setInterval(() => void refresh(), REFRESH_MS);
+    let unlisten: (() => void) | undefined;
+    onContextfulEvent((e) => {
+      if (e.event === "job" || e.event === "run" || e.event === "module" || e.event === "index") {
+        void refresh();
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      clearInterval(t);
+      unlisten?.();
+    };
+  }, [refresh]);
 
   const entries = filterEntries(parseEventLog(text), filter);
 
@@ -57,6 +69,9 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
             </button>
           ))}
         </div>
+        <button className="text-xs text-cf-muted hover:text-cf-ink" onClick={() => void refresh()}>
+          refresh
+        </button>
         <button className="text-xs text-cf-muted hover:text-cf-ink" onClick={copyFiltered}>
           copy
         </button>

@@ -91,6 +91,35 @@ def test_refresh_index_enriches_and_caches(workspace: Path):
     asyncio.run(run())
 
 
+def test_user_override_from_index_file_beats_ai(workspace: Path):
+    (workspace / INDEX_FILE).write_text(
+        json.dumps({
+            "version": 1,
+            "items": [{
+                "id": "repo:backoffice",
+                "type": "repo",
+                "path": "repos/backoffice",
+                "description": "GUI edit",
+                "keywords": ["manual"],
+                "source": "user",
+                "userEdited": True,
+            }],
+        }),
+        encoding="utf-8",
+    )
+    client = FakeClient()
+
+    async def run():
+        await refresh_index(workspace=workspace, client=client, models={"module": "test/model"})
+        index = json.loads((workspace / INDEX_FILE).read_text(encoding="utf-8"))
+        repo = next(i for i in index["items"] if i["id"] == "repo:backoffice")
+        assert repo["description"] == "GUI edit"
+        assert repo["keywords"] == ["manual"]
+        assert repo["source"] == "user"
+
+    asyncio.run(run())
+
+
 def test_user_override_beats_ai(workspace: Path):
     ann_path = workspace / ANNOTATIONS_FILE
     ann_path.write_text(

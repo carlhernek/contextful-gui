@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const INDEX_FILE: &str = ".workspace-index.json";
+#[allow(dead_code)]
 pub const ANNOTATIONS_FILE: &str = ".index-annotations.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,14 +22,6 @@ pub struct IndexAnnotation {
     pub updated_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnnotationsDoc {
-    #[serde(default)]
-    version: u32,
-    #[serde(default)]
-    items: serde_json::Map<String, Value>,
-}
-
 fn empty_index() -> Value {
     json!({
         "version": 1,
@@ -38,45 +31,48 @@ fn empty_index() -> Value {
     })
 }
 
-fn load_annotations(project: &Path) -> Result<AnnotationsDoc> {
-    let path = project.join(ANNOTATIONS_FILE);
-    if !path.exists() {
-        return Ok(AnnotationsDoc {
-            version: 1,
-            items: serde_json::Map::new(),
-        });
-    }
-    let raw = fs::read_to_string(&path).with_context(|| format!("read {ANNOTATIONS_FILE}"))?;
-    let doc: AnnotationsDoc = serde_json::from_str(&raw).unwrap_or(AnnotationsDoc {
-        version: 1,
-        items: serde_json::Map::new(),
-    });
-    Ok(doc)
-}
-
-fn save_annotations(project: &Path, doc: &AnnotationsDoc) -> Result<()> {
-    let path = project.join(ANNOTATIONS_FILE);
-    fs::write(&path, serde_json::to_string_pretty(doc)?).context("write annotations")
-}
-
+/// Patch description/keywords on an existing item in `.workspace-index.json` (no sidecar, no LLM).
 pub fn set_annotation(
     project: &Path,
     item_id: &str,
     description: &str,
     keywords: &[String],
 ) -> Result<IndexAnnotation> {
-    let mut doc = load_annotations(project)?;
-    let ann = IndexAnnotation {
+    let path = project.join(INDEX_FILE);
+    if !path.exists() {
+        anyhow::bail!(
+            "index not built yet for {item_id} — run the Workspace Index module first"
+        );
+    }
+    let raw = fs::read_to_string(&path).with_context(|| format!("read {INDEX_FILE}"))?;
+    let mut index: Value =
+        serde_json::from_str(&raw).with_context(|| format!("parse {INDEX_FILE}"))?;
+    let items = index
+        .get_mut("items")
+        .and_then(|v| v.as_array_mut())
+        .context("index items array missing")?;
+    let pos = items
+        .iter()
+        .position(|it| it.get("id").and_then(|v| v.as_str()) == Some(item_id))
+        .with_context(|| format!("index item not found: {item_id}"))?;
+    let now = Local::now().to_rfc3339();
+    let item = &mut items[pos];
+    if let Some(obj) = item.as_object_mut() {
+        obj.insert("description".into(), json!(description));
+        obj.insert("keywords".into(), json!(keywords));
+        obj.insert("source".into(), json!("user"));
+        obj.insert("userEdited".into(), json!(true));
+        obj.insert("enrichedAt".into(), json!(now));
+    }
+    if let Some(root) = index.as_object_mut() {
+        root.insert("updatedAt".into(), json!(now));
+    }
+    fs::write(&path, serde_json::to_string_pretty(&index)?).context("write index")?;
+    Ok(IndexAnnotation {
         description: description.to_string(),
         keywords: keywords.to_vec(),
-        updated_at: Some(Local::now().to_rfc3339()),
-    };
-    doc.items.insert(
-        item_id.to_string(),
-        serde_json::to_value(&ann).context("serialize annotation")?,
-    );
-    save_annotations(project, &doc)?;
-    Ok(ann)
+        updated_at: Some(now),
+    })
 }
 
 pub fn get_index(project: &Path) -> Result<Value> {
@@ -124,8 +120,13 @@ mod tests {
     }
 
     #[test]
-    fn set_annotation_roundtrip() {
+    fn set_annotation_patches_index_file() {
         let (_tmp, project) = fixture_project();
+        fs::write(
+            project.join(INDEX_FILE),
+            r#"{"version":1,"items":[{"id":"repo:backoffice","type":"repo","description":"old","keywords":[]}]}"#,
+        )
+        .unwrap();
         let ann = set_annotation(
             &project,
             "repo:backoffice",
@@ -136,8 +137,27 @@ mod tests {
         assert_eq!(ann.description, "Admin API service");
         assert_eq!(ann.keywords.len(), 2);
 
-        let doc = load_annotations(&project).unwrap();
-        assert!(doc.items.contains_key("repo:backoffice"));
+        let index = get_index(&project).unwrap();
+        let item = index["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|it| it["id"] == "repo:backoffice")
+            .unwrap();
+        assert_eq!(item["description"], "Admin API service");
+        assert_eq!(item["source"], "user");
+        assert!(item["userEdited"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn set_annotation_requires_existing_index_item() {
+        let (_tmp, project) = fixture_project();
+        fs::write(
+            project.join(INDEX_FILE),
+            r#"{"version":1,"items":[{"id":"meta:req.md","type":"meta"}]}"#,
+        )
+        .unwrap();
+        assert!(set_annotation(&project, "repo:missing", "x", &[]).is_err());
     }
 
     #[test]
@@ -179,9 +199,13 @@ mod tests {
         let index = get_index(&project).unwrap();
         assert_eq!(index["items"].as_array().unwrap().len(), 0);
 
+        fs::write(
+            project.join(INDEX_FILE),
+            r#"{"version":1,"items":[{"id":"meta:requirements.md","type":"meta","description":"","keywords":[]}]}"#,
+        )
+        .unwrap();
         set_annotation(&project, "meta:requirements.md", "User note", &["req".into()]).unwrap();
-        assert!(project.join(ANNOTATIONS_FILE).exists());
-        assert!(!project.join(INDEX_FILE).exists());
+        assert!(!project.join(ANNOTATIONS_FILE).exists());
 
         let meta_before = fs::read_to_string(project.join("meta/requirements.md")).unwrap();
         crate::workspace::touch_project(&project);
@@ -192,15 +216,17 @@ mod tests {
     }
 
     #[test]
-    fn annotations_survive_index_overwrite() {
+    fn set_annotation_updates_existing_item_in_place() {
         let (_tmp, project) = fixture_project();
-        set_annotation(&project, "meta:req.md", "Requirements doc", &["req".into()]).unwrap();
         fs::write(
             project.join(INDEX_FILE),
-            r#"{"version":1,"items":[{"id":"meta:req.md","description":"auto"}]}"#,
+            r#"{"version":1,"items":[{"id":"meta:req.md","description":"auto","keywords":[]}]}"#,
         )
         .unwrap();
-        let doc = load_annotations(&project).unwrap();
-        assert!(doc.items.contains_key("meta:req.md"));
+        set_annotation(&project, "meta:req.md", "Requirements doc", &["req".into()]).unwrap();
+        let index = get_index(&project).unwrap();
+        let item = &index["items"][0];
+        assert_eq!(item["description"], "Requirements doc");
+        assert_eq!(item["source"], "user");
     }
 }

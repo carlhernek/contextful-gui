@@ -119,7 +119,7 @@ class SidecarServer:
                     workspace=Path(workspace),
                     client=self.client,
                     models=self.models,
-                    skip_enrichment=params.get("skipEnrichment", False),
+                    skip_enrichment=params.get("skipEnrichment", True),
                     on_event=lambda ev, data: self._emit_event(req_id, ev, data),
                     should_cancel=self.should_cancel,
                 )

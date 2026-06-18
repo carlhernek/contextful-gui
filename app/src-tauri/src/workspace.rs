@@ -346,27 +346,63 @@ pub fn clone_repos(install: &Path, id: &str) -> Result<Value> {
     let meta = read_meta(&project)?;
     let repos_dir = project.join("repos");
     fs::create_dir_all(&repos_dir).ok();
+    append_eventlog(
+        &project,
+        "git",
+        "START",
+        &format!("clone all ({} repos)", meta.repos.len()),
+    );
     let mut results = Vec::new();
     for repo in &meta.repos {
         let dest = repos_dir.join(&repo.name);
         if dest.join(".git").exists() {
             let _ = harden_readonly_repo(&dest);
+            append_eventlog(
+                &project,
+                "git",
+                "SUCCESS",
+                &format!("{} already cloned", repo.name),
+            );
             results.push(json!({"name": repo.name, "ok": true, "status": "already cloned"}));
             continue;
         }
         match clone_one(&repo.url, &repo.branch, &dest) {
             Ok(()) => {
                 let _ = harden_readonly_repo(&dest);
+                append_eventlog(
+                    &project,
+                    "git",
+                    "SUCCESS",
+                    &format!("{} cloned (branch {})", repo.name, repo.branch),
+                );
                 results.push(json!({"name": repo.name, "ok": true, "status": "cloned"}));
             }
             Err(e) => {
                 let msg = e.to_string();
                 let kind = classify_git_error(&msg);
+                append_eventlog(
+                    &project,
+                    "git",
+                    "ERROR",
+                    &format!("{} clone failed — {msg}", repo.name),
+                );
                 results.push(json!({"name": repo.name, "ok": false, "error": msg, "kind": kind}));
             }
         }
     }
+    let ok_count = results.iter().filter(|r| r["ok"].as_bool() == Some(true)).count();
+    append_git_batch_summary(&project, "clone", ok_count, meta.repos.len());
     Ok(json!({"results": results}))
+}
+
+fn append_git_batch_summary(project: &Path, operation: &str, ok_count: usize, total: usize) {
+    let status = if ok_count == total { "SUCCESS" } else { "ERROR" };
+    append_eventlog(
+        project,
+        "git",
+        status,
+        &format!("{operation} finished ({ok_count}/{total} ok)"),
+    );
 }
 
 fn clone_one(url: &str, branch: &str, dest: &Path) -> Result<()> {
@@ -440,10 +476,22 @@ pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
     let project = project_dir(install, id);
     touch_project(&project);
     let meta = read_meta(&project)?;
+    append_eventlog(
+        &project,
+        "git",
+        "START",
+        &format!("pull all ({} repos)", meta.repos.len()),
+    );
     let mut results = Vec::new();
     for repo in &meta.repos {
         let dest = project.join("repos").join(&repo.name);
         if !dest.join(".git").exists() {
+            append_eventlog(
+                &project,
+                "git",
+                "ERROR",
+                &format!("{} not cloned — skipped", repo.name),
+            );
             results.push(json!({
                 "name": repo.name,
                 "ok": false,
@@ -467,6 +515,16 @@ pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
                         let head = repo_git_run(&["rev-parse", "--short", "HEAD"], &dest)
                             .ok()
                             .map(|s| s.trim().to_string());
+                        append_eventlog(
+                            &project,
+                            "git",
+                            "SUCCESS",
+                            &format!(
+                                "{} pulled origin/{branch}{}",
+                                repo.name,
+                                head.as_ref().map(|h| format!(" @{h}")).unwrap_or_default()
+                            ),
+                        );
                         results.push(json!({
                             "name": repo.name,
                             "ok": true,
@@ -476,6 +534,12 @@ pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
                     }
                     Err(e) => {
                         let msg = e.to_string();
+                        append_eventlog(
+                            &project,
+                            "git",
+                            "ERROR",
+                            &format!("{} pull failed — {msg}", repo.name),
+                        );
                         results.push(json!({
                             "name": repo.name,
                             "ok": false,
@@ -487,6 +551,12 @@ pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
             }
             Err(e) => {
                 let msg = e.to_string();
+                append_eventlog(
+                    &project,
+                    "git",
+                    "ERROR",
+                    &format!("{} fetch failed — {msg}", repo.name),
+                );
                 results.push(json!({
                     "name": repo.name,
                     "ok": false,
@@ -496,6 +566,8 @@ pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
             }
         }
     }
+    let ok_count = results.iter().filter(|r| r["ok"].as_bool() == Some(true)).count();
+    append_git_batch_summary(&project, "pull", ok_count, meta.repos.len());
     Ok(json!({"results": results}))
 }
 
@@ -1044,6 +1116,10 @@ mod tests {
         let results = result["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert!(!results[0]["ok"].as_bool().unwrap());
+
+        let log = fs::read_to_string(project.join(".eventlog")).unwrap();
+        assert!(log.contains("git ERROR"));
+        assert!(log.contains("pull finished (0/1 ok)"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from contextful_sidecar.runtime.agents import compose_orchestrator_prompt
 from contextful_sidecar.runtime.eventlog import append_eventlog, read_eventlog_tail
-from contextful_sidecar.runtime.indexing import format_index_for_prompt, load_index, refresh_index
+from contextful_sidecar.runtime.indexing import format_index_for_prompt, load_index
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.tools import ORCHESTRATOR_TOOL_DEFINITIONS, execute_readonly_tool
 
@@ -171,24 +171,17 @@ async def handle_chat(
             ),
         }
 
-    # Refresh index before Q&A so orchestrator sees current repos/meta/artefacts.
+    # Q&A uses the last built index only — no scan/enrich here (Workspace Index module owns that).
     try:
-        await refresh_index(
-            workspace=ws,
+        reply = await _orchestrator_qa(
+            ws=ws,
+            message=message,
             client=client,
             models=models,
             on_event=on_event,
             should_cancel=should_cancel,
         )
-    except Exception:  # noqa: BLE001 — index refresh must not block chat
-        pass
-
-    reply = await _orchestrator_qa(
-        ws=ws,
-        message=message,
-        client=client,
-        models=models,
-        on_event=on_event,
-        should_cancel=should_cancel,
-    )
+    except Exception as exc:  # noqa: BLE001
+        append_eventlog(ws, "orchestrator", "ERROR", f"chat failed — {exc}")
+        raise
     return {"type": "chat", "reply": reply}

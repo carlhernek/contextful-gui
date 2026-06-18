@@ -10,4 +10,4 @@ Read and follow [AGENTS.md](../AGENTS.md) when adding or modifying long-running 
 - Register every worker with `JobManager` in `src-tauri/src/jobs.rs`
 - Never queue or double-run — reject when busy
 - UI: use `useJob()` / `JobsProvider`, not local busy `useState`
-- Auto index refresh: coalesce with `try_begin_or_skip`, skip if busy
+- No automatic indexing after clone/pull/meta — only the Workspace Index pipeline module

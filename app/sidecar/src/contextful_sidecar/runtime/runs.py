@@ -174,6 +174,7 @@ async def run_modules(
         if not skill.exists():
             err = f"SKILL.md not found for module {module_id}"
             append_eventlog(ws, module_id, "ERROR", err)
+            append_eventlog(ws, "run", "ERROR", f"runId={run_id} failed at {module_id}: {err}")
             on_event("module", {"module": module_id, "status": "ERROR", "summary": err})
             save_run_state(ws, run_id, status="failed", failedModule=module_id, error=err)
             on_event("run", {"runId": run_id, "status": "failed", "completedModules": completed})
@@ -202,10 +203,13 @@ async def run_modules(
 
         if should_cancel():
             save_run_state(ws, run_id, status="cancelled")
+            append_eventlog(ws, "run", "CANCELLED", f"runId={run_id}")
             on_event("run", {"runId": run_id, "status": "cancelled", "completedModules": completed})
             return {"runId": run_id, "status": "cancelled", "completedModules": completed}
 
         if error is not None:
+            append_eventlog(ws, module_id, "ERROR", error)
+            append_eventlog(ws, "run", "ERROR", f"runId={run_id} failed at {module_id}: {error}")
             on_event("module", {"module": module_id, "status": "ERROR", "summary": error})
             save_run_state(ws, run_id, status="failed", failedModule=module_id, error=error)
             on_event("run", {"runId": run_id, "status": "failed", "completedModules": completed})
@@ -221,17 +225,6 @@ async def run_modules(
     append_eventlog(ws, "run", "SUCCESS", f"runId={run_id} completed {len(completed)} modules")
     _write_run_summary(ws, run_id, completed, project_type, version)
     on_event("run", {"runId": run_id, "status": "complete", "completedModules": completed})
-    if WORKSPACE_INDEX_MODULE not in completed:
-        try:
-            await refresh_index(
-                workspace=ws,
-                client=client,
-                models=models,
-                on_event=on_event,
-                should_cancel=should_cancel,
-            )
-        except Exception:  # noqa: BLE001
-            pass
     return {"runId": run_id, "status": "complete", "completedModules": completed}
 
 

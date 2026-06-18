@@ -265,7 +265,20 @@ def scan_items(workspace: Path) -> list[dict[str, Any]]:
 
 def load_annotations(workspace: Path) -> dict[str, Any]:
     data = _read_json(Path(workspace) / ANNOTATIONS_FILE, {})
-    return data.get("items", {}) if isinstance(data, dict) else {}
+    items = dict(data.get("items", {})) if isinstance(data, dict) else {}
+    # Manual edits written straight into `.workspace-index.json` must survive re-index.
+    for item in load_index(workspace).get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not item_id:
+            continue
+        if item.get("userEdited") or item.get("source") == "user":
+            items[str(item_id)] = {
+                "description": item.get("description", ""),
+                "keywords": item.get("keywords") or [],
+            }
+    return items
 
 
 def load_cache(workspace: Path) -> dict[str, Any]:

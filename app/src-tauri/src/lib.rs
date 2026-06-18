@@ -29,6 +29,25 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+fn log_project_error(project: &std::path::Path, scope: &str, message: &str) {
+    workspace::append_eventlog(project, scope, "ERROR", message);
+}
+
+fn reject_job_busy(app: &AppHandle, project_id: &str, operation: &str, busy: jobs::JobBusy) -> String {
+    if let Ok(install) = install_path(app) {
+        let project = workspace::project_dir(&install, project_id);
+        let msg = busy_error(busy);
+        log_project_error(
+            &project,
+            "job",
+            &format!("{operation} rejected — {msg}"),
+        );
+        msg
+    } else {
+        busy_error(busy)
+    }
+}
+
 fn install_path(app: &AppHandle) -> CmdResult<PathBuf> {
     let s = settings::load_settings(app).map_err(err)?;
     s.install_path
@@ -180,34 +199,40 @@ fn set_project_type(app: AppHandle, id: String, project_type: String) -> CmdResu
 #[tauri::command]
 fn add_repo(app: AppHandle, id: String, name: String, url: String, branch: String) -> CmdResult<()> {
     let install = install_path(&app)?;
-    workspace::add_repo(&install, &id, &name, &url, &branch).map_err(err)
+    let project = workspace::project_dir(&install, &id);
+    workspace::add_repo(&install, &id, &name, &url, &branch).map_err(|e| {
+        log_project_error(&project, "git", &format!("add repo {name} failed — {e}"));
+        err(e)
+    })
 }
 
 #[tauri::command]
 fn remove_repo(app: AppHandle, id: String, name: String) -> CmdResult<()> {
     let install = install_path(&app)?;
-    workspace::remove_repo(&install, &id, &name).map_err(err)
+    let project = workspace::project_dir(&install, &id);
+    workspace::remove_repo(&install, &id, &name).map_err(|e| {
+        log_project_error(&project, "git", &format!("remove repo {name} failed — {e}"));
+        err(e)
+    })
 }
 
 #[tauri::command]
 async fn clone_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
     let guard = state
         .jobs
-        .try_begin(&app, JobKind::Clone, &id, "Cloning repositories")
-        .map_err(busy_error)?;
-    let install = install_path(&app)?;
-    let project_id = id.clone();
+        .try_begin(&app, &project, JobKind::Clone, &id, "Cloning repositories")
+        .map_err(|busy| reject_job_busy(&app, &id, "clone", busy))?;
     let clone_result = tauri::async_runtime::spawn_blocking(move || workspace::clone_repos(&install, &id))
         .await
         .map_err(err)?
         .map_err(err);
-    if clone_result.is_err() {
-        guard.fail();
+    if let Err(ref e) = clone_result {
+        guard.fail_with("git", &format!("clone failed — {e}"));
     }
     drop(guard);
-    let result = clone_result?;
-    let index_warning = trigger_index_refresh_or_warn(app, &state, &project_id, false).await;
-    Ok(attach_index_warning(result, index_warning))
+    clone_result
 }
 
 #[tauri::command]
@@ -218,36 +243,43 @@ fn list_repos(app: AppHandle, id: String) -> CmdResult<Vec<Value>> {
 
 #[tauri::command]
 async fn pull_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
     let guard = state
         .jobs
-        .try_begin(&app, JobKind::Pull, &id, "Pulling repositories")
-        .map_err(busy_error)?;
-    let install = install_path(&app)?;
-    let project_id = id.clone();
+        .try_begin(&app, &project, JobKind::Pull, &id, "Pulling repositories")
+        .map_err(|busy| reject_job_busy(&app, &id, "pull", busy))?;
     let pull_result = tauri::async_runtime::spawn_blocking(move || workspace::pull_repos(&install, &id))
         .await
         .map_err(err)?
         .map_err(err);
-    if pull_result.is_err() {
-        guard.fail();
+    if let Err(ref e) = pull_result {
+        guard.fail_with("git", &format!("pull failed — {e}"));
     }
     drop(guard);
-    let result = pull_result?;
-    let index_warning = trigger_index_refresh_or_warn(app, &state, &project_id, false).await;
-    Ok(attach_index_warning(result, index_warning))
+    pull_result
 }
 
 // ===== meta docs ==========================================================
 #[tauri::command]
 async fn upload_meta_files(
     app: AppHandle,
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     id: String,
     sources: Vec<String>,
 ) -> CmdResult<Vec<String>> {
     let install = install_path(&app)?;
-    let uploaded = workspace::upload_meta_files(&install, &id, &sources).map_err(err)?;
-    let _ = trigger_index_refresh_or_warn(app, &state, &id, false).await;
+    let project = workspace::project_dir(&install, &id);
+    let uploaded = workspace::upload_meta_files(&install, &id, &sources).map_err(|e| {
+        log_project_error(&project, "meta", &format!("upload failed — {e}"));
+        err(e)
+    })?;
+    workspace::append_eventlog(
+        &project,
+        "meta",
+        "SUCCESS",
+        &format!("uploaded {} file(s): {}", uploaded.len(), uploaded.join(", ")),
+    );
     Ok(uploaded)
 }
 
@@ -260,13 +292,17 @@ fn list_meta_dir(app: AppHandle, id: String, rel_path: Option<String>) -> CmdRes
 #[tauri::command]
 async fn delete_meta_entry(
     app: AppHandle,
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     id: String,
     path: String,
 ) -> CmdResult<()> {
     let install = install_path(&app)?;
-    workspace::delete_meta_entry(&install, &id, &path).map_err(err)?;
-    let _ = trigger_index_refresh_or_warn(app, &state, &id, false).await;
+    let project = workspace::project_dir(&install, &id);
+    workspace::delete_meta_entry(&install, &id, &path).map_err(|e| {
+        log_project_error(&project, "meta", &format!("delete {path} failed — {e}"));
+        err(e)
+    })?;
+    workspace::append_eventlog(&project, "meta", "SUCCESS", &format!("deleted {path}"));
     Ok(())
 }
 
@@ -350,10 +386,14 @@ async fn get_modules_version_status(app: AppHandle, id: String, fetch: bool) -> 
 #[tauri::command]
 async fn pull_project_modules(app: AppHandle, id: String) -> CmdResult<Value> {
     let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
     tauri::async_runtime::spawn_blocking(move || workspace::pull_project_modules(&install, &id))
         .await
         .map_err(err)?
-        .map_err(err)
+        .map_err(|e| {
+            log_project_error(&project, "gui", &format!("pull modules failed — {e}"));
+            err(e)
+        })
 }
 
 // ===== sidecar-backed operations ==========================================
@@ -398,81 +438,9 @@ async fn ensure_configured(
     Ok(())
 }
 
-async fn trigger_index_refresh(
-    app: AppHandle,
-    state: &State<'_, AppState>,
-    project_id: &str,
-    skip_enrichment: bool,
-) -> CmdResult<()> {
-    let Some(guard) = state.jobs.try_begin_or_skip(
-        &app,
-        JobKind::Index,
-        project_id,
-        "Indexing workspace",
-    ) else {
-        return Ok(());
-    };
-    let result = async {
-        ensure_configured(&app, state, Some(project_id)).await?;
-        let workspace = project_workspace(&app, project_id)?;
-        let _ = rpc(
-            app.clone(),
-            state.sidecar.clone(),
-            "refresh_index",
-            json!({"workspace": workspace, "skipEnrichment": skip_enrichment}),
-        )
-        .await?;
-        Ok::<(), String>(())
-    }
-    .await;
-    if result.is_err() {
-        guard.fail();
-    }
-    result
-}
-
-async fn trigger_index_refresh_or_warn(
-    app: AppHandle,
-    state: &State<'_, AppState>,
-    project_id: &str,
-    skip_enrichment: bool,
-) -> Option<String> {
-    if state.jobs.current().is_some() {
-        if let Ok(install) = install_path(&app) {
-            let project = workspace::project_dir(&install, project_id);
-            workspace::append_eventlog(
-                &project,
-                "index",
-                "SKIP",
-                "index refresh skipped — another job is active",
-            );
-        }
-        return None;
-    }
-    match trigger_index_refresh(app.clone(), state, project_id, skip_enrichment).await {
-        Ok(()) => None,
-        Err(e) => {
-            if let Ok(install) = install_path(&app) {
-                let project = workspace::project_dir(&install, project_id);
-                workspace::append_eventlog(
-                    &project,
-                    "index",
-                    "WARN",
-                    &format!("refresh_index failed: {e}"),
-                );
-            }
-            Some(e)
-        }
-    }
-}
-
-fn attach_index_warning(mut value: Value, warning: Option<String>) -> Value {
-    if let Some(w) = warning {
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("indexWarning".to_string(), json!(w));
-        }
-    }
-    value
+fn project_dir(app: &AppHandle, project_id: &str) -> CmdResult<PathBuf> {
+    let install = install_path(app)?;
+    Ok(workspace::project_dir(&install, project_id))
 }
 
 #[tauri::command]
@@ -481,7 +449,18 @@ fn list_jobs(state: State<'_, AppState>) -> Vec<jobs::Job> {
 }
 
 #[tauri::command]
-fn stop_job(state: State<'_, AppState>) -> CmdResult<()> {
+fn stop_job(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    if let Some(job) = state.jobs.current() {
+        if let Ok(project) = project_dir(&app, &job.project_id) {
+            workspace::append_eventlog(
+                &project,
+                "job",
+                "CANCELLED",
+                &format!("stop requested — {} ({})", job.label, job.kind.as_str()),
+            );
+        }
+        state.jobs.mark_cancelled_logged();
+    }
     state.sidecar.cancel();
     Ok(())
 }
@@ -504,7 +483,6 @@ async fn read_index_item(app: AppHandle, id: String, item_id: String) -> CmdResu
 #[tauri::command]
 async fn set_index_annotation(
     app: AppHandle,
-    state: State<'_, AppState>,
     id: String,
     item_id: String,
     description: String,
@@ -512,8 +490,30 @@ async fn set_index_annotation(
 ) -> CmdResult<Value> {
     let install = install_path(&app)?;
     let project = workspace::project_dir(&install, &id);
-    let ann = indexing::set_annotation(&project, &item_id, &description, &keywords).map_err(err)?;
-    let _ = trigger_index_refresh_or_warn(app, &state, &id, true).await;
+    let ann = indexing::set_annotation(&project, &item_id, &description, &keywords).map_err(|e| {
+        log_project_error(
+            &project,
+            "index",
+            &format!("annotation save {item_id} failed — {e}"),
+        );
+        err(e)
+    })?;
+    let kw = if keywords.is_empty() {
+        "(none)".to_string()
+    } else {
+        keywords.join(", ")
+    };
+    let desc_preview = if description.trim().is_empty() {
+        "(empty)".to_string()
+    } else {
+        description.trim().chars().take(120).collect()
+    };
+    workspace::append_eventlog(
+        &project,
+        "index",
+        "SUCCESS",
+        &format!("annotation saved {item_id} keywords=[{kw}] description=\"{desc_preview}\""),
+    );
     Ok(json!(ann))
 }
 
@@ -530,17 +530,36 @@ async fn sidecar_health(app: AppHandle, state: State<'_, AppState>) -> CmdResult
 
 #[tauri::command]
 async fn send_chat(app: AppHandle, state: State<'_, AppState>, id: String, message: String) -> CmdResult<Value> {
-    ensure_configured(&app, &state, Some(&id)).await?;
     let install = install_path(&app)?;
     let project = workspace::project_dir(&install, &id);
-    workspace::touch_project(&project);
-    workspace::append_chatlog(&project, "user", &message).map_err(err)?;
-    let workspace = project.to_string_lossy().to_string();
-    let result = rpc(app, state.sidecar.clone(), "chat", json!({"workspace": workspace, "message": message})).await?;
-    if let Some(reply) = result.get("reply").and_then(|v| v.as_str()) {
-        workspace::append_chatlog(&project, "assistant", reply).map_err(err)?;
+    if let Err(e) = ensure_configured(&app, &state, Some(&id)).await {
+        log_project_error(&project, "orchestrator", &format!("chat failed — {e}"));
+        return Err(e);
     }
-    Ok(result)
+    workspace::touch_project(&project);
+    workspace::append_chatlog(&project, "user", &message).map_err(|e| {
+        log_project_error(&project, "orchestrator", &format!("chat log write failed — {e}"));
+        err(e)
+    })?;
+    let workspace = project.to_string_lossy().to_string();
+    let result = rpc(
+        app,
+        state.sidecar.clone(),
+        "chat",
+        json!({"workspace": workspace, "message": message}),
+    )
+    .await;
+    if let Err(ref e) = result {
+        log_project_error(&project, "orchestrator", &format!("chat failed — {e}"));
+        return result;
+    }
+    if let Some(reply) = result.as_ref().ok().and_then(|r| r.get("reply").and_then(|v| v.as_str())) {
+        workspace::append_chatlog(&project, "assistant", reply).map_err(|e| {
+            log_project_error(&project, "orchestrator", &format!("chat log write failed — {e}"));
+            err(e)
+        })?;
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -555,14 +574,21 @@ async fn start_run(
     resume: bool,
     specific_instructions: Option<String>,
 ) -> CmdResult<Value> {
-    ensure_configured(&app, &state, Some(&id)).await?;
+    let project = project_dir(&app, &id)?;
+    if let Err(e) = ensure_configured(&app, &state, Some(&id)).await {
+        log_project_error(&project, "run", &format!("run failed — {e}"));
+        return Err(e);
+    }
     let guard = state
         .jobs
-        .try_begin(&app, JobKind::Run, &id, "Running pipeline")
-        .map_err(busy_error)?;
+        .try_begin(&app, &project, JobKind::Run, &id, "Running pipeline")
+        .map_err(|busy| reject_job_busy(&app, &id, "run", busy))?;
     let workspace = project_workspace(&app, &id)?;
     let install = install_path(&app)?;
-    let meta = workspace::read_meta(&workspace::project_dir(&install, &id)).map_err(err)?;
+    let meta = workspace::read_meta(&workspace::project_dir(&install, &id)).map_err(|e| {
+        log_project_error(&project, "run", &format!("run failed — {e}"));
+        err(e)
+    })?;
     let result = rpc(
         app,
         state.sidecar.clone(),
@@ -578,9 +604,18 @@ async fn start_run(
         }),
     )
     .await;
-    if result.is_err() {
-        guard.fail();
+    match &result {
+        Err(e) => {
+            guard.fail_with("run", &format!("run_modules RPC failed — {e}"));
+        }
+        Ok(v) => match v.get("status").and_then(|s| s.as_str()) {
+            Some("failed") | Some("cancelled") => {
+                guard.fail();
+            }
+            _ => {}
+        },
     }
+    drop(guard);
     result
 }
 

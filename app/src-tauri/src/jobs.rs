@@ -1,6 +1,8 @@
 //! Central job registry: single-flight long-running work with app-wide busy state.
 
 use std::cell::Cell;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Local;
@@ -8,6 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::sidecar::{SidecarEvent, EVENT_NAME};
+use crate::workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -54,12 +57,16 @@ struct JobEvent {
 
 pub struct JobManager {
     current: Mutex<Option<Job>>,
+    cancelled: AtomicBool,
+    cancel_logged: AtomicBool,
 }
 
 impl JobManager {
     pub fn new() -> Self {
         Self {
             current: Mutex::new(None),
+            cancelled: AtomicBool::new(false),
+            cancel_logged: AtomicBool::new(false),
         }
     }
 
@@ -76,26 +83,37 @@ impl JobManager {
         self.current.lock().unwrap().clone()
     }
 
+    pub fn mark_cancelled(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn mark_cancelled_logged(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.cancel_logged.store(true, Ordering::SeqCst);
+    }
+
     /// Begin a job or reject if another is active (user-initiated operations).
     pub fn try_begin<R: Runtime>(
         self: &Arc<Self>,
         app: &AppHandle<R>,
+        project: &Path,
         kind: JobKind,
         project_id: &str,
         label: &str,
     ) -> Result<JobGuard<R>, JobBusy> {
-        self.try_begin_inner(app, kind, project_id, label, false)
+        self.try_begin_inner(app, project, kind, project_id, label, false)
     }
 
     /// Begin a job or return None if another is active (auto/coalesced operations).
     pub fn try_begin_or_skip<R: Runtime>(
         self: &Arc<Self>,
         app: &AppHandle<R>,
+        project: &Path,
         kind: JobKind,
         project_id: &str,
         label: &str,
     ) -> Option<JobGuard<R>> {
-        match self.try_begin_inner(app, kind, project_id, label, true) {
+        match self.try_begin_inner(app, project, kind, project_id, label, true) {
             Ok(guard) => Some(guard),
             Err(_) => None,
         }
@@ -104,11 +122,14 @@ impl JobManager {
     fn try_begin_inner<R: Runtime>(
         self: &Arc<Self>,
         app: &AppHandle<R>,
+        project: &Path,
         kind: JobKind,
         project_id: &str,
         label: &str,
         skip_if_busy: bool,
     ) -> Result<JobGuard<R>, JobBusy> {
+        self.cancelled.store(false, Ordering::SeqCst);
+        self.cancel_logged.store(false, Ordering::SeqCst);
         let mut slot = self.current.lock().unwrap();
         if let Some(current) = slot.clone() {
             if skip_if_busy {
@@ -127,25 +148,59 @@ impl JobManager {
         *slot = Some(job.clone());
         drop(slot);
 
+        workspace::append_eventlog(
+            project,
+            "job",
+            "START",
+            &format!("{label} ({})", kind.as_str()),
+        );
         emit_job_event(app, "started", &job);
         Ok(JobGuard {
             manager: Arc::clone(self),
             app: app.clone(),
+            project: project.to_path_buf(),
+            job: Some(job),
             failed: Cell::new(false),
         })
     }
 
-    fn finish<R: Runtime>(&self, app: &AppHandle<R>, failed: bool) {
-        let job = self.current.lock().unwrap().take();
-        if let Some(job) = job {
-            emit_job_event(app, if failed { "failed" } else { "finished" }, &job);
+    fn finish<R: Runtime>(&self, app: &AppHandle<R>, project: &Path, job: &Job, failed: bool) {
+        let cancelled = self.cancelled.swap(false, Ordering::SeqCst);
+        let already_logged = self.cancel_logged.swap(false, Ordering::SeqCst);
+        let (status, detail) = if cancelled {
+            ("CANCELLED", "stopped by user")
+        } else if failed {
+            ("ERROR", "failed")
+        } else {
+            ("SUCCESS", "finished")
+        };
+        if !(cancelled && already_logged) {
+            workspace::append_eventlog(
+                project,
+                "job",
+                status,
+                &format!("{} ({}) — {detail}", job.label, job.kind.as_str()),
+            );
         }
+        emit_job_event(
+            app,
+            if cancelled {
+                "cancelled"
+            } else if failed {
+                "failed"
+            } else {
+                "finished"
+            },
+            job,
+        );
     }
 }
 
 pub struct JobGuard<R: Runtime> {
     manager: Arc<JobManager>,
     app: AppHandle<R>,
+    project: PathBuf,
+    job: Option<Job>,
     failed: Cell<bool>,
 }
 
@@ -153,11 +208,25 @@ impl<R: Runtime> JobGuard<R> {
     pub fn fail(&self) {
         self.failed.set(true);
     }
+
+    /// Mark the job failed and append a scope-specific ERROR line (in addition to job ERROR on drop).
+    pub fn fail_with(&self, scope: &str, message: &str) {
+        workspace::append_eventlog(&self.project, scope, "ERROR", message);
+        self.failed.set(true);
+    }
 }
 
 impl<R: Runtime> Drop for JobGuard<R> {
     fn drop(&mut self) {
-        self.manager.finish(&self.app, self.failed.get());
+        if let Some(job) = self.job.take() {
+            self.manager.current.lock().unwrap().take();
+            self.manager.finish(
+                &self.app,
+                &self.project,
+                &job,
+                self.failed.get(),
+            );
+        }
     }
 }
 

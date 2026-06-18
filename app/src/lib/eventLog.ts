@@ -24,14 +24,15 @@ export function parseEventLog(text: string): EventLogEntry[] {
 
 export type LogFilter = "ALL" | "Ops" | "TURN" | "ERROR" | "TOOL";
 
-const OPS_STATUSES = new Set(["START", "SUCCESS", "CANCELLED", "RETRY", "RESUME"]);
+const OPS_STATUSES = new Set(["START", "SUCCESS", "CANCELLED", "RETRY", "RESUME", "SKIP", "WARN"]);
+const OPS_SCOPES = new Set(["job", "git", "index", "gui", "run"]);
 
 export function filterEntries(entries: EventLogEntry[], filter: LogFilter): EventLogEntry[] {
   if (filter === "ALL") return entries;
   return entries.filter((e) => {
     switch (filter) {
       case "Ops":
-        return OPS_STATUSES.has(e.status);
+        return OPS_STATUSES.has(e.status) || OPS_SCOPES.has(e.scope);
       case "TURN":
         return e.status === "TURN";
       case "ERROR":

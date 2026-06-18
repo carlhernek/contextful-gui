@@ -111,7 +111,31 @@ export interface TasksDoc {
 export interface ModuleArtifact {
   moduleId: string;
   hasAnalysis: boolean;
+  hasActivity?: boolean;
   tasks: TasksDoc | null;
+}
+
+export interface ActivityEntry {
+  seq: number;
+  ts: string;
+  kind: string;
+  turn?: number;
+  maxTurns?: number;
+  text?: string;
+  name?: string;
+  args?: Record<string, unknown>;
+  result?: string;
+  itemId?: string;
+  itemIndex?: number;
+  itemTotal?: number;
+  path?: string;
+  status?: string;
+  description?: string;
+  keywords?: string[];
+}
+
+export interface RunActivity {
+  entries: ActivityEntry[];
 }
 
 export interface RunArtifacts {
@@ -221,6 +245,8 @@ export const api = {
   listRuns: (id: string) => invoke<RunState[]>("list_runs", { id }),
   getRunArtifacts: (id: string, runId: string) =>
     invoke<RunArtifacts>("get_run_artifacts", { id, runId }),
+  getRunActivity: (id: string, runId: string, moduleId: string) =>
+    invoke<RunActivity>("get_run_activity", { id, runId, moduleId }),
 
   configureSidecar: (projectId?: string) =>
     invoke<void>("configure_sidecar", { projectId: projectId ?? null }),

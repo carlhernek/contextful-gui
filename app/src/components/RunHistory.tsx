@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, type RunState } from "../lib/ipc";
+import { useCallback, useEffect, useState } from "react";
+import { api, onContextfulEvent, type RunState } from "../lib/ipc";
 import { statusTextClass } from "../lib/statusStyles";
 
 interface Props {
@@ -9,12 +9,39 @@ interface Props {
   onSelect: (runId: string) => void;
 }
 
+const RUN_POLL_MS = 5000;
+
 export function RunHistory({ projectId, activeRunId, refreshKey, onSelect }: Props) {
   const [runs, setRuns] = useState<RunState[]>([]);
 
+  const refresh = useCallback(async () => {
+    try {
+      setRuns(await api.listRuns(projectId));
+    } catch {
+      setRuns([]);
+    }
+  }, [projectId]);
+
   useEffect(() => {
-    (async () => setRuns(await api.listRuns(projectId)))();
-  }, [projectId, refreshKey]);
+    void refresh();
+  }, [refresh, refreshKey]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    onContextfulEvent((e) => {
+      if (e.event === "run" || e.event === "module" || e.event === "job") {
+        void refresh();
+      }
+    }).then((fn) => (unlisten = fn));
+    return () => unlisten?.();
+  }, [refresh]);
+
+  useEffect(() => {
+    const hasRunning = runs.some((r) => r.status === "running");
+    if (!hasRunning) return;
+    const timer = setInterval(() => void refresh(), RUN_POLL_MS);
+    return () => clearInterval(timer);
+  }, [runs, refresh]);
 
   return (
     <div className="rounded-lg border border-cf-border bg-cf-surface p-4">

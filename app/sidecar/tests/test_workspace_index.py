@@ -51,6 +51,8 @@ def test_workspace_index_module_writes_index():
             assert (ws / INDEX_FILE).exists()
             index = json.loads((ws / INDEX_FILE).read_text(encoding="utf-8"))
             assert any(i["id"] == "meta:requirements.md" for i in index["items"])
+            activity_path = ws / "runs" / "idx-run" / WORKSPACE_INDEX_MODULE / "activity.jsonl"
+            assert activity_path.exists()
 
     asyncio.run(run())
 

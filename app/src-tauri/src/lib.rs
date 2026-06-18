@@ -420,6 +420,17 @@ fn get_run_artifacts(app: AppHandle, id: String, run_id: String) -> CmdResult<Va
 }
 
 #[tauri::command]
+fn get_run_activity(
+    app: AppHandle,
+    id: String,
+    run_id: String,
+    module_id: String,
+) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    Ok(workspace::get_run_activity(&install, &id, &run_id, &module_id))
+}
+
+#[tauri::command]
 async fn get_run_state(app: AppHandle, state: State<'_, AppState>, id: String, run_id: String) -> CmdResult<Value> {
     let workspace = project_workspace(&app, &id)?;
     rpc(app, state.sidecar.clone(), "get_run_state",
@@ -761,6 +772,7 @@ pub fn run() {
             get_run_state,
             list_runs,
             get_run_artifacts,
+            get_run_activity,
             configure_sidecar,
             sidecar_health,
             send_chat,

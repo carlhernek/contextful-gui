@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.tools import _git_env, _list_directory, _read_file, _silent_run
 
@@ -405,6 +406,7 @@ def _merge_item(
         "source": source,
         "contentHash": raw.get("contentHash"),
         "enrichedAt": _now_iso() if source in ("ai", "user") else None,
+        "status": raw.get("status") or ("done" if description else "pending"),
     }
     if user:
         out["userEdited"] = True
@@ -499,6 +501,191 @@ async def refresh_index(
     _write_json_atomic(ws / INDEX_FILE, doc)
     _write_json_atomic(ws / CACHE_FILE, cache)
     return {"ok": True, "itemCount": len(merged), "enriched": enriched, "updatedAt": doc["updatedAt"]}
+
+
+def _item_already_indexed(
+    raw: dict[str, Any],
+    *,
+    annotations: dict[str, Any],
+    cache: dict[str, Any],
+) -> bool:
+    item_id = raw["id"]
+    content_hash = raw.get("contentHash", "")
+    user = annotations.get(item_id) if isinstance(annotations.get(item_id), dict) else {}
+    if user.get("description") or user.get("keywords"):
+        return True
+    cached = cache.get(item_id) if isinstance(cache.get(item_id), dict) else {}
+    return cached.get("contentHash") == content_hash and bool(cached.get("description"))
+
+
+async def agentic_reindex(
+    *,
+    workspace: str | Path,
+    run_id: str,
+    client: OpenRouterClient | None = None,
+    models: dict[str, str] | None = None,
+    on_event: EventCallback | None = None,
+    should_cancel: CancelCheck | None = None,
+) -> dict[str, Any]:
+    """Two-phase agentic indexer: enumerate all items, then one bounded agent per item."""
+    from contextful_sidecar.runtime.activity import append_activity
+    from contextful_sidecar.runtime.index_agent import MODULE_ID, index_item
+
+    ws = Path(workspace)
+    on_event = on_event or (lambda _e, _d: None)
+    should_cancel = should_cancel or (lambda: False)
+    models = models or {}
+    model = models.get("module") or models.get("orchestrator") or "deepseek/deepseek-v4-flash"
+
+    raw_items = scan_items(ws)
+    annotations = load_annotations(ws)
+    cache = load_cache(ws)
+    total = len(raw_items)
+
+    append_eventlog(ws, MODULE_ID, "ENUMERATE", f"{total} items")
+    on_event("index", {"phase": "enumerate", "total": total, "module": MODULE_ID})
+
+    skeleton: list[dict[str, Any]] = []
+    for raw in raw_items:
+        if _item_already_indexed(raw, annotations=annotations, cache=cache):
+            merged = _merge_item(raw, annotations=annotations, cache=cache, ai=None)
+            merged["status"] = "cached"
+        else:
+            merged = _merge_item(raw, annotations=annotations, cache=cache, ai=None)
+            merged["status"] = "pending"
+            merged["description"] = merged.get("description") or ""
+        skeleton.append(merged)
+
+    doc = build_index_document(ws, skeleton)
+    _write_json_atomic(ws / INDEX_FILE, doc)
+
+    enriched = 0
+    skipped = 0
+    pending_items = [r for r in raw_items if not _item_already_indexed(r, annotations=annotations, cache=cache)]
+    pending_total = len(pending_items)
+
+    for idx, raw in enumerate(raw_items, start=1):
+        if should_cancel():
+            break
+        item_id = raw["id"]
+        if _item_already_indexed(raw, annotations=annotations, cache=cache):
+            skipped += 1
+            on_event(
+                "index",
+                {
+                    "itemId": item_id,
+                    "status": "skipped",
+                    "index": idx,
+                    "total": total,
+                    "module": MODULE_ID,
+                },
+            )
+            append_activity(
+                ws,
+                run_id,
+                MODULE_ID,
+                "item",
+                status="skipped",
+                itemId=item_id,
+                itemIndex=idx,
+                itemTotal=total,
+                path=raw.get("path"),
+            )
+            continue
+
+        on_event(
+            "index",
+            {
+                "itemId": item_id,
+                "status": "indexing",
+                "index": idx,
+                "total": total,
+                "module": MODULE_ID,
+            },
+        )
+
+        if client is None:
+            ai = {
+                "description": _heuristic_description(raw["type"], raw.get("name", ""), raw.get("snippet") or ""),
+                "keywords": _heuristic_keywords(raw["type"], raw.get("name", ""), raw["path"]),
+            }
+        else:
+            ai = await index_item(
+                workspace=ws,
+                run_id=run_id,
+                item=raw,
+                item_index=idx,
+                item_total=total,
+                model=model,
+                client=client,
+                on_event=on_event,
+                should_cancel=should_cancel,
+            )
+
+        if should_cancel():
+            break
+
+        content_hash = raw.get("contentHash", "")
+        cache[item_id] = {
+            "contentHash": content_hash,
+            "description": ai.get("description"),
+            "keywords": ai.get("keywords"),
+            "source": "ai",
+            "enrichedAt": _now_iso(),
+        }
+        enriched += 1
+
+        for i, entry in enumerate(skeleton):
+            if entry["id"] == item_id:
+                skeleton[i] = _merge_item(
+                    raw,
+                    annotations=annotations,
+                    cache=cache,
+                    ai=ai,
+                    prefer_ai=True,
+                )
+                skeleton[i]["status"] = "done"
+                break
+
+        doc = build_index_document(ws, skeleton)
+        _write_json_atomic(ws / INDEX_FILE, doc)
+        _write_json_atomic(ws / CACHE_FILE, cache)
+
+        on_event(
+            "index",
+            {
+                "itemId": item_id,
+                "status": "done",
+                "index": idx,
+                "total": total,
+                "module": MODULE_ID,
+            },
+        )
+        append_activity(
+            ws,
+            run_id,
+            MODULE_ID,
+            "item",
+            status="done",
+            itemId=item_id,
+            itemIndex=idx,
+            itemTotal=total,
+            path=raw.get("path"),
+            description=ai.get("description"),
+        )
+
+    final_doc = build_index_document(ws, skeleton)
+    _write_json_atomic(ws / INDEX_FILE, final_doc)
+    _write_json_atomic(ws / CACHE_FILE, cache)
+
+    return {
+        "ok": True,
+        "itemCount": len(skeleton),
+        "enriched": enriched,
+        "skipped": skipped,
+        "pendingTotal": pending_total,
+        "updatedAt": final_doc["updatedAt"],
+    }
 
 
 def format_index_for_prompt(index: dict[str, Any]) -> str:

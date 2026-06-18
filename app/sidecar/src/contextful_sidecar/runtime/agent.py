@@ -1,14 +1,15 @@
 """Per-module turn-based agent loop (spec section 5)."""
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any, Callable
 
+from contextful_sidecar.runtime.activity import append_activity
 from contextful_sidecar.runtime.agents import compose_module_prompt
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
+from contextful_sidecar.runtime.tool_runner import run_tool_with_liveness
 from contextful_sidecar.runtime.tools import (
     TOOL_DEFINITIONS,
     execute_tool,
@@ -17,48 +18,7 @@ from contextful_sidecar.runtime.tools import (
 
 EventCallback = Callable[[str, Any], None]
 
-HEARTBEAT_INTERVAL_SEC = 15.0
 MAX_FETCH_REFUNDS = 20
-
-
-def _tool_done_summary(name: str, result: str) -> str:
-    head = result.splitlines()[0] if result else ""
-    if len(head) > 160:
-        head = head[:160] + "…"
-    return f"{name}: {head}"
-
-
-async def _run_tool_with_liveness(*, workspace, log_scope, turn, name, args, on_event):
-    if on_event:
-        on_event("activity", {"module": log_scope, "kind": "tool_start", "name": name, "turn": turn})
-    stop_heartbeat = asyncio.Event()
-
-    async def heartbeat() -> None:
-        while not stop_heartbeat.is_set():
-            try:
-                await asyncio.wait_for(stop_heartbeat.wait(), timeout=HEARTBEAT_INTERVAL_SEC)
-            except TimeoutError:
-                if on_event:
-                    on_event("heartbeat", {"module": log_scope, "turn": turn, "tool": name})
-
-    hb = asyncio.create_task(heartbeat())
-    try:
-        # Tools are SYNC (subprocess / file IO). Run off-loop so cancellation
-        # and heartbeats keep flowing and the UI never looks frozen.
-        result = await asyncio.to_thread(execute_tool, workspace, name, args)
-    except Exception as exc:  # noqa: BLE001
-        result = f"ERROR: {exc}"
-    finally:
-        stop_heartbeat.set()
-        hb.cancel()
-        try:
-            await hb
-        except asyncio.CancelledError:
-            pass
-    append_eventlog(workspace, log_scope, "TOOL_DONE", _tool_done_summary(name, result))
-    if on_event:
-        on_event("activity", {"module": log_scope, "kind": "tool_done", "name": name, "turn": turn})
-    return result
 
 
 def _turn_was_only_failed_fetch(tool_calls, results) -> bool:
@@ -84,7 +44,7 @@ def _build_system_prompt(*, role, module_id, workspace, repo_paths, meta_docs,
         "Meta documents:\n"
         f"{metas}\n\n"
         "You have these tools: read_file, list_directory, write_file, append_eventlog, "
-        "write_analysis, write_tasks, grep_repo, run_script, web_search, web_fetch.\n"
+        "write_analysis, write_tasks, grep_repo, run_script, web_search, web_fetch, gather_context.\n"
         "You may ONLY write under runs/<runId>/, research/, and the .eventlog. Use grep_repo "
         "for code search instead of reading whole large files."
     )
@@ -137,6 +97,7 @@ async def run_agent(
         if on_event:
             on_event("turn", {"module": module_id, "turn": turn, "maxTurns": max_turns})
         append_eventlog(workspace, module_id, "TURN", f"turn {turn}/{max_turns}")
+        append_activity(workspace, run_id, module_id, "turn", turn=turn, maxTurns=max_turns)
 
         response = await client.chat_completion(
             model=model, messages=messages, tools=TOOL_DEFINITIONS, on_token=on_token,
@@ -145,10 +106,15 @@ async def run_agent(
         tool_calls = message.get("tool_calls") or []
         messages.append(message)
 
+        content = message.get("content") or ""
+        if content.strip():
+            append_activity(workspace, run_id, module_id, "thinking", turn=turn, text=content)
+
         if not tool_calls:
-            content = message.get("content", "") or f"{role} complete."
-            append_eventlog(workspace, module_id, "SUCCESS", content.splitlines()[0][:160] if content else "")
-            return content
+            final = content or f"{role} complete."
+            append_eventlog(workspace, module_id, "SUCCESS", final.splitlines()[0][:160] if final else "")
+            append_activity(workspace, run_id, module_id, "final", turn=turn, text=final)
+            return final
 
         if on_event:
             on_event("token", "\n\n")
@@ -164,9 +130,16 @@ async def run_agent(
             append_eventlog(workspace, module_id, "TOOL", f"{name} {json.dumps(args)[:160]}")
             if on_event:
                 on_event("tool", {"name": name, "args": args})
-            result = await _run_tool_with_liveness(
-                workspace=workspace, log_scope=module_id, turn=turn,
-                name=name, args=args, on_event=on_event,
+            append_activity(workspace, run_id, module_id, "tool", turn=turn, name=name, args=args)
+            result = await run_tool_with_liveness(
+                workspace=workspace,
+                log_scope=module_id,
+                turn=turn,
+                name=name,
+                args=args,
+                on_event=on_event,
+                run_id=run_id,
+                module_id=module_id,
             )
             results.append(result)
             messages.append({
@@ -179,5 +152,7 @@ async def run_agent(
             fetch_refunds += 1
             turn -= 1  # refund: transient network failures shouldn't burn the budget
 
+    err = f"{role} stopped after {max_turns} turns (incomplete)"
     append_eventlog(workspace, module_id, "ERROR", f"stopped after {max_turns} turns")
-    return f"{role} stopped after {max_turns} turns (incomplete)"
+    append_activity(workspace, run_id, module_id, "error", text=err)
+    return err

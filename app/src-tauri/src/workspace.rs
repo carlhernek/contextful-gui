@@ -1007,15 +1007,41 @@ pub fn get_run_artifacts(install: &Path, id: &str, run_id: &str) -> Value {
             let tasks = fs::read_to_string(&tasks_path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+            let has_activity = e.path().join("activity.jsonl").exists();
             modules.push(json!({
                 "moduleId": mid,
                 "hasAnalysis": analysis,
+                "hasActivity": has_activity,
                 "tasks": tasks,
             }));
         }
     }
     let summary = fs::read_to_string(run_dir.join("run-summary.md")).ok();
     json!({"runId": run_id, "modules": modules, "summary": summary})
+}
+
+pub fn get_run_activity(install: &Path, id: &str, run_id: &str, module_id: &str) -> Value {
+    let path = project_dir(install, id)
+        .join(RUN_STATE_DIR)
+        .join(run_id)
+        .join(module_id)
+        .join("activity.jsonl");
+    if !path.exists() {
+        return json!({"entries": []});
+    }
+    let mut entries = Vec::new();
+    if let Ok(content) = fs::read_to_string(&path) {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                entries.push(v);
+            }
+        }
+    }
+    json!({"entries": entries})
 }
 
 // --- module versioning / updates (spec 8.2) -------------------------------
@@ -1344,5 +1370,41 @@ mod tests {
             "",
         );
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn get_run_activity_parses_jsonl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        init_workspace_dirs(&project).unwrap();
+        let activity_dir = project.join("runs/run-1/mod-a");
+        fs::create_dir_all(&activity_dir).unwrap();
+        fs::write(
+            activity_dir.join("activity.jsonl"),
+            r#"{"seq":1,"ts":"2025-01-01T00:00:00+00:00","kind":"turn","turn":1}
+{"seq":2,"kind":"thinking","text":"hello"}
+"#,
+        )
+        .unwrap();
+        let out = get_run_activity(install, "p1", "run-1", "mod-a");
+        let entries = out["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["kind"], "turn");
+    }
+
+    #[test]
+    fn get_run_artifacts_reports_has_activity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        init_workspace_dirs(&project).unwrap();
+        let mod_dir = project.join("runs/run-1/workspace-index");
+        fs::create_dir_all(&mod_dir).unwrap();
+        fs::write(mod_dir.join("activity.jsonl"), "{}\n").unwrap();
+        let out = get_run_artifacts(install, "p1", "run-1");
+        let modules = out["modules"].as_array().unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0]["hasActivity"], true);
     }
 }

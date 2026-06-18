@@ -20,6 +20,10 @@ RUN_SCRIPT_TIMEOUT = 120         # seconds
 RUN_SCRIPT_OUTPUT_CAP = 8000     # chars
 GREP_MAX_MATCHES = 200
 GREP_MAX_LINE_LEN = 400
+GATHER_CONTEXT_CAP = 24_000        # chars for gather_context bundle
+GATHER_DOC_EXCERPT = 3000          # per doc file excerpt
+GATHER_TREE_DEPTH = 2
+GATHER_TREE_MAX = 40
 
 PROVENANCE_HEADER = (
     "<!-- online research, not original repo material -->\n"
@@ -219,6 +223,29 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "gather_context",
+            "description": (
+                "Gather a condensed context bundle for an item path: README/docs, API specs, "
+                "stack manifests, and a bounded directory tree. Prefer this for repos and large trees."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+]
+
+INDEX_TOOL_NAMES = frozenset({
+    "read_file", "list_directory", "grep_repo", "gather_context",
+})
+INDEX_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    t for t in TOOL_DEFINITIONS
+    if (t.get("function") or {}).get("name") in INDEX_TOOL_NAMES
 ]
 
 ORCHESTRATOR_READONLY_TOOLS = frozenset({"read_file", "list_directory", "grep_repo"})
@@ -403,6 +430,114 @@ def _web_search(workspace: Path, query: str) -> str:
     )
 
 
+def _excerpt_file(path: Path, cap: int = GATHER_DOC_EXCERPT) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        data = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if len(data) > cap:
+        return data[:cap] + "\n...[truncated]"
+    return data
+
+
+def _gather_tree(workspace: Path, root: Path) -> list[str]:
+    lines: list[str] = []
+
+    def walk(base: Path, depth: int) -> None:
+        if depth > GATHER_TREE_DEPTH or len(lines) >= GATHER_TREE_MAX:
+            return
+        try:
+            children = sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError:
+            return
+        for child in children:
+            if child.name in {".git", "node_modules", "target", "dist", "__pycache__", ".venv", "venv"}:
+                continue
+            rel = child.relative_to(workspace).as_posix()
+            prefix = "dir" if child.is_dir() else "file"
+            lines.append(f"{prefix}\t{rel}")
+            if len(lines) >= GATHER_TREE_MAX:
+                return
+            if child.is_dir():
+                walk(child, depth + 1)
+
+    if root.is_dir():
+        walk(root, 0)
+    return lines
+
+
+def _gather_context(workspace: Path, path: str) -> str:
+    target = _resolve(workspace, path)
+    if not target.exists():
+        return f"ERROR: path not found: {path}"
+
+    sections: list[str] = [f"# Context bundle for {path}\n"]
+
+    doc_candidates: list[Path] = []
+    if target.is_file():
+        doc_candidates.append(target)
+    else:
+        for name in ("README.md", "README", "README.txt", "ARCHITECTURE.md", "CONTRIBUTING.md"):
+            p = target / name
+            if p.is_file():
+                doc_candidates.append(p)
+        docs_dir = target / "docs"
+        if docs_dir.is_dir():
+            for fp in sorted(docs_dir.rglob("*")):
+                if fp.is_file() and fp.suffix.lower() in {".md", ".txt", ".rst"}:
+                    doc_candidates.append(fp)
+                    if len(doc_candidates) >= 8:
+                        break
+
+    if doc_candidates:
+        sections.append("## Documentation\n")
+        for fp in doc_candidates[:8]:
+            rel = fp.relative_to(workspace).as_posix()
+            body = _excerpt_file(fp)
+            if body.strip():
+                sections.append(f"### {rel}\n{body}\n")
+
+    manifest_names = (
+        "package.json", "pyproject.toml", "Cargo.toml", "go.mod",
+        "requirements.txt", "composer.json", "pom.xml",
+    )
+    manifests: list[str] = []
+    search_root = target if target.is_dir() else target.parent
+    for name in manifest_names:
+        fp = search_root / name
+        if fp.is_file():
+            manifests.append(f"### {fp.relative_to(workspace).as_posix()}\n{_excerpt_file(fp, 2000)}\n")
+    if manifests:
+        sections.append("## Stack manifests\n" + "\n".join(manifests))
+
+    api_patterns = ("openapi", "swagger", "graphql")
+    api_files: list[str] = []
+    if search_root.is_dir():
+        for fp in sorted(search_root.rglob("*")):
+            if not fp.is_file():
+                continue
+            lower = fp.name.lower()
+            if any(p in lower for p in api_patterns) and fp.suffix.lower() in {".yaml", ".yml", ".json", ".graphql", ".gql"}:
+                rel = fp.relative_to(workspace).as_posix()
+                api_files.append(f"### {rel}\n{_excerpt_file(fp, 4000)}\n")
+                if len(api_files) >= 4:
+                    break
+    if api_files:
+        sections.append("## API specs\n" + "\n".join(api_files))
+
+    tree_root = target if target.is_dir() else target.parent
+    tree_lines = _gather_tree(workspace, tree_root)
+    if tree_lines:
+        sections.append("## Directory tree (bounded)\n" + "\n".join(tree_lines))
+
+    out = "\n".join(sections)
+    if len(out) > GATHER_CONTEXT_CAP:
+        out = out[:GATHER_CONTEXT_CAP] + "\n...[truncated]"
+    return out or f"(no context gathered for {path})"
+
+
 # --- dispatcher (sync; run off-loop by the agent) -------------------------
 def execute_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
     workspace = Path(workspace)
@@ -428,6 +563,8 @@ def execute_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
             return _web_fetch(workspace, args["url"], args["filename"])
         if name == "web_search":
             return _web_search(workspace, args["query"])
+        if name == "gather_context":
+            return _gather_context(workspace, args["path"])
         return f"ERROR: unknown tool: {name}"
     except ValueError as exc:  # path escape and similar
         return f"ERROR: {exc}"

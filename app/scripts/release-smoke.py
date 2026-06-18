@@ -71,6 +71,31 @@ def rpc(proc: subprocess.Popen, req_id: str, method: str, params: dict | None = 
         return data
 
 
+def rpc_with_events(
+    proc: subprocess.Popen,
+    req_id: str,
+    method: str,
+    params: dict | None = None,
+) -> tuple[dict, list[dict]]:
+    line = json.dumps({"id": req_id, "method": method, "params": params or {}})
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    proc.stdin.write(line + "\n")
+    proc.stdin.flush()
+    events: list[dict] = []
+    while True:
+        raw = proc.stdout.readline()
+        if not raw:
+            raise RuntimeError(f"sidecar exited before response to {method}")
+        data = json.loads(raw)
+        if data.get("id") != req_id:
+            continue
+        if "event" in data:
+            events.append(data)
+            continue
+        return data, events
+
+
 def assert_not_unknown(resp: dict, method: str) -> None:
     err = resp.get("error", "")
     if "unknown method" in str(err).lower():
@@ -118,6 +143,59 @@ def _run_matrix(proc: subprocess.Popen, ws: Path, *, prefix: str) -> None:
     assert preview.get("result", {}).get("ok") is True
 
 
+def _agentic_index_smoke(proc: subprocess.Popen, ws: Path, *, prefix: str) -> None:
+    """run_modules workspace-index with cache seeded from index (no live LLM calls)."""
+    ws_str = str(ws)
+    (ws / "modules" / "workspace-index").mkdir(parents=True, exist_ok=True)
+    (ws / "modules" / "workspace-index" / "SKILL.md").write_text("# Workspace Index\n", encoding="utf-8")
+
+    index_path = ws / ".workspace-index.json"
+    if not index_path.exists():
+        refresh = rpc(proc, f"{prefix}-idx-seed", "refresh_index", {
+            "workspace": ws_str,
+            "skipEnrichment": True,
+        })
+        assert_not_unknown(refresh, "refresh_index")
+
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    cache = {
+        item["id"]: {
+            "contentHash": item.get("contentHash"),
+            "description": item.get("description") or "cached",
+            "keywords": item.get("keywords") or ["cached"],
+            "source": "ai",
+        }
+        for item in index.get("items", [])
+        if item.get("id")
+    }
+    (ws / ".index-cache.json").write_text(json.dumps(cache), encoding="utf-8")
+
+    run_id = "smoke-index-1"
+    resp, events = rpc_with_events(proc, f"{prefix}-run-idx", "run_modules", {
+        "workspace": ws_str,
+        "runId": run_id,
+        "modules": ["workspace-index"],
+        "projectType": "both",
+        "resume": False,
+        "force": True,
+    })
+    if resp.get("error"):
+        raise AssertionError(f"run_modules workspace-index failed: {resp}")
+    status = resp.get("result", {}).get("status")
+    if status != "complete":
+        raise AssertionError(f"run_modules workspace-index status={status!r} resp={resp}")
+    index_events = [e for e in events if e.get("event") == "index"]
+    assert any(e.get("data", {}).get("phase") == "enumerate" for e in index_events), (
+        "expected enumerate index event"
+    )
+    activity = ws / "runs" / run_id / "workspace-index" / "activity.jsonl"
+    if not activity.exists():
+        raise AssertionError("agentic index did not write activity.jsonl")
+    index = json.loads((ws / ".workspace-index.json").read_text(encoding="utf-8"))
+    assert index.get("items"), "index should have items after agentic run"
+    print("OK: agentic workspace-index smoke (cached skip path)")
+
+
 def main() -> int:
     binary = sidecar_binary()
     print(f"release-smoke: using {binary}")
@@ -139,6 +217,7 @@ def main() -> int:
         proc = subprocess.Popen([str(binary)], **kwargs)
         try:
             _run_matrix(proc, ws, prefix="current")
+            _agentic_index_smoke(proc, ws, prefix="current")
 
             for version, project in legacy:
                 _run_matrix(proc, project, prefix=f"legacy-{version.replace('.', '-')}")

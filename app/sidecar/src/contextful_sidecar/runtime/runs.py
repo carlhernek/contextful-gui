@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from contextful_sidecar.runtime.agent import run_agent
 from contextful_sidecar.runtime.eventlog import append_eventlog
-from contextful_sidecar.runtime.indexing import refresh_index
+from contextful_sidecar.runtime.indexing import agentic_reindex
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 
 EventCallback = Callable[[str, Any], None]
@@ -187,6 +187,7 @@ async def run_modules(
         if module_id == WORKSPACE_INDEX_MODULE:
             summary, error = await _run_workspace_index(
                 ws=ws,
+                run_id=run_id,
                 client=client,
                 models=models,
                 on_event=on_event,
@@ -231,6 +232,7 @@ async def run_modules(
 async def _run_workspace_index(
     *,
     ws: Path,
+    run_id: str,
     client: OpenRouterClient,
     models: dict[str, str],
     on_event: EventCallback,
@@ -239,8 +241,9 @@ async def _run_workspace_index(
     if should_cancel():
         return "", "cancelled"
     try:
-        result = await refresh_index(
+        result = await agentic_reindex(
             workspace=ws,
+            run_id=run_id,
             client=client,
             models=models,
             on_event=on_event,
@@ -249,7 +252,9 @@ async def _run_workspace_index(
         if should_cancel():
             return "", "cancelled"
         count = result.get("itemCount", 0)
-        return f"Indexed {count} items", None
+        enriched = result.get("enriched", 0)
+        skipped = result.get("skipped", 0)
+        return f"Indexed {count} items ({enriched} enriched, {skipped} skipped)", None
     except asyncio.CancelledError:
         return "", "cancelled"
     except Exception as exc:  # noqa: BLE001

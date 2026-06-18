@@ -2,33 +2,52 @@ import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
-import { api, type RunArtifacts } from "../lib/ipc";
+import { api, onContextfulEvent, type RunArtifacts } from "../lib/ipc";
 import { KanbanBoard } from "./KanbanBoard";
 import { IndexButton } from "./IndexButton";
 import { Spinner } from "./Spinner";
+import { ActivityFeed } from "./ActivityFeed";
+import { useJob } from "../lib/jobs";
 
 export function ResultsView({ projectId, runId }: { projectId: string; runId: string | null }) {
   const [artifacts, setArtifacts] = useState<RunArtifacts | null>(null);
   const [active, setActive] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<string>("");
-  const [tab, setTab] = useState<"analysis" | "tasks">("analysis");
+  const [tab, setTab] = useState<"analysis" | "tasks" | "activity">("analysis");
   const [loading, setLoading] = useState(false);
+  const { busy: runBusy } = useJob("run", projectId);
+
+  const loadArtifacts = async (id: string) => {
+    setLoading(true);
+    try {
+      const a = await api.getRunArtifacts(projectId, id);
+      setArtifacts(a);
+      setActive((prev) => {
+        if (prev && a.modules.some((m) => m.moduleId === prev)) return prev;
+        return a.modules[0]?.moduleId ?? null;
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!runId) {
       setArtifacts(null);
       return;
     }
-    (async () => {
-      setLoading(true);
-      try {
-        const a = await api.getRunArtifacts(projectId, runId);
-        setArtifacts(a);
-        setActive(a.modules[0]?.moduleId ?? null);
-      } finally {
-        setLoading(false);
+    void loadArtifacts(runId);
+  }, [projectId, runId]);
+
+  useEffect(() => {
+    if (!runId) return;
+    let unlisten: (() => void) | undefined;
+    onContextfulEvent((e) => {
+      if (e.event === "module" || e.event === "run") {
+        void loadArtifacts(runId);
       }
-    })();
+    }).then((fn) => (unlisten = fn));
+    return () => unlisten?.();
   }, [projectId, runId]);
 
   useEffect(() => {
@@ -42,7 +61,7 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
   if (!runId) {
     return <p className="p-6 text-sm text-cf-muted">Select a run to view results.</p>;
   }
-  if (loading) {
+  if (loading && !artifacts) {
     return (
       <div className="p-6">
         <Spinner />
@@ -51,6 +70,7 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
   }
 
   const current = artifacts?.modules.find((m) => m.moduleId === active);
+  const showActivity = tab === "activity" && active;
 
   return (
     <div className="flex h-full flex-col">
@@ -90,6 +110,12 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
         >
           Tasks ({current?.tasks?.tasks.length ?? 0})
         </button>
+        <button
+          className={`rounded-md px-3 py-1 text-sm ${tab === "activity" ? "bg-cf-accent text-cf-accent-ink" : "text-cf-muted hover:text-cf-ink"}`}
+          onClick={() => setTab("activity")}
+        >
+          Activity
+        </button>
         {runId && active && current?.tasks && (
           <IndexButton
             projectId={projectId}
@@ -104,8 +130,17 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
           <div className="cf-markdown max-w-3xl">
             <Markdown remarkPlugins={[remarkGfm, remarkBreaks]}>{analysis}</Markdown>
           </div>
-        ) : (
+        ) : tab === "tasks" ? (
           <KanbanBoard tasks={current?.tasks?.tasks ?? []} />
+        ) : showActivity ? (
+          <ActivityFeed
+            projectId={projectId}
+            runId={runId}
+            moduleId={active}
+            live={runBusy}
+          />
+        ) : (
+          <p className="text-sm text-cf-muted">Select a module to view activity.</p>
         )}
       </div>
     </div>

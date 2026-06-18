@@ -11,6 +11,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARIES = ROOT / "src-tauri" / "binaries"
+SIDECAR_SRC = ROOT / "sidecar" / "src"
+TESTS = ROOT / "sidecar" / "tests"
 
 TARGET_TRIPLES = {
     ("Windows", "AMD64"): "contextful-sidecar-x86_64-pc-windows-msvc.exe",
@@ -76,55 +78,72 @@ def assert_not_unknown(resp: dict, method: str) -> None:
         raise AssertionError(f"{method} failed: {resp}")
 
 
+def _legacy_projects() -> list[tuple[str, Path]]:
+    if str(SIDECAR_SRC) not in sys.path:
+        sys.path.insert(0, str(SIDECAR_SRC))
+    if str(TESTS) not in sys.path:
+        sys.path.insert(0, str(TESTS))
+    from legacy_fixture import LEGACY_PROJECT_VERSIONS, build_legacy_project  # noqa: E402
+
+    out: list[tuple[str, Path]] = []
+    for version in LEGACY_PROJECT_VERSIONS:
+        tmp = Path(tempfile.mkdtemp(prefix=f"cf-legacy-{version}-"))
+        out.append((version, build_legacy_project(tmp, template_version=version)))
+    return out
+
+
+def _run_matrix(proc: subprocess.Popen, ws: Path, *, prefix: str) -> None:
+    ws_str = str(ws)
+    cfg = rpc(proc, f"{prefix}-cfg", "configure", {"api_key": "fake-key"})
+    assert_not_unknown(cfg, "configure")
+    assert cfg.get("result", {}).get("ok") is True
+
+    refresh = rpc(proc, f"{prefix}-ref", "refresh_index", {
+        "workspace": ws_str,
+        "skipEnrichment": True,
+    })
+    assert_not_unknown(refresh, "refresh_index")
+    assert refresh.get("result", {}).get("ok") is True
+    index_path = ws / ".workspace-index.json"
+    if not index_path.exists():
+        raise AssertionError(f"refresh_index did not create .workspace-index.json ({prefix})")
+
+    preview = rpc(proc, f"{prefix}-prv", "preview", {
+        "workspace": ws_str,
+        "path": "requirements.md",
+        "base": "meta",
+    })
+    assert_not_unknown(preview, "preview")
+    assert preview.get("result", {}).get("ok") is True
+
+
 def main() -> int:
     binary = sidecar_binary()
     print(f"release-smoke: using {binary}")
 
+    kwargs: dict = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.DEVNULL,
+        "text": True,
+        "bufsize": 1,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+
+    legacy = _legacy_projects()
     with tempfile.TemporaryDirectory() as tmp:
         ws = _seed_workspace(Path(tmp))
-        ws_str = str(ws)
-
-        kwargs: dict = {
-            "stdin": subprocess.PIPE,
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.DEVNULL,
-            "text": True,
-            "bufsize": 1,
-        }
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
 
         proc = subprocess.Popen([str(binary)], **kwargs)
         try:
-            cfg = rpc(proc, "cfg", "configure", {"api_key": "fake-key"})
-            assert_not_unknown(cfg, "configure")
-            assert cfg.get("result", {}).get("ok") is True
+            _run_matrix(proc, ws, prefix="current")
 
-            refresh = rpc(proc, "ref", "refresh_index", {
-                "workspace": ws_str,
-                "skipEnrichment": True,
-            })
-            assert_not_unknown(refresh, "refresh_index")
-            assert refresh.get("result", {}).get("ok") is True
-            index_path = ws / ".workspace-index.json"
-            if not index_path.exists():
-                raise AssertionError("refresh_index did not create .workspace-index.json")
+            for version, project in legacy:
+                _run_matrix(proc, project, prefix=f"legacy-{version.replace('.', '-')}")
+                print(f"OK: frozen sidecar legacy project {version}")
 
-            enrich = rpc(proc, "enr", "enrich_index_item", {
-                "workspace": ws_str,
-                "itemId": "repo:web",
-            })
-            assert_not_unknown(enrich, "enrich_index_item")
-
-            preview = rpc(proc, "prv", "preview", {
-                "workspace": ws_str,
-                "path": "README.md",
-                "base": "repos/web",
-            })
-            assert_not_unknown(preview, "preview")
-            assert preview.get("result", {}).get("ok") is True
-
-            print("OK: frozen sidecar RPC matrix passed")
+            print("OK: frozen sidecar RPC matrix passed (current + legacy v1.0.0, v1.1.0)")
             return 0
         finally:
             if proc.stdin:

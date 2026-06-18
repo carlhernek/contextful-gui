@@ -59,7 +59,7 @@ Covers source-sidecar tests, Rust tests, pytest (including RPC manifest), and wo
 
 ## Release (mandatory gate)
 
-**Never publish without passing the release gate.** The gate runs pre-build smoke, full `build:all`, verifies the frozen sidecar binary is newer than source, and exercises the **PyInstaller binary** via NDJSON (`refresh_index`, `enrich_index_item`, `preview`).
+**Never publish without passing the release gate.** The gate runs pre-build smoke, full `build:all`, verifies the frozen sidecar binary is newer than source, and exercises the **PyInstaller binary** via NDJSON (`refresh_index`, `preview`).
 
 ```powershell
 # Windows — gate only (no publish)

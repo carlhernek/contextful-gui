@@ -47,6 +47,12 @@ PY'
 
 step "Sidecar preview pytest" bash -c "cd \"$APP/sidecar\" && uv run pytest tests/test_preview.py -q"
 
+step "Workspace index module pytest" bash -c "cd \"$APP/sidecar\" && uv run pytest tests/test_workspace_index.py -q"
+
+step "Legacy project index pytest (v1.0.0, v1.1.0)" bash -c "cd \"$APP/sidecar\" && uv run pytest tests/test_legacy_index.py -q"
+
+step "Legacy project index smoke (v1.0.0, v1.1.0)" bash -c "cd \"$APP/sidecar\" && uv run python ../scripts/legacy-project-smoke.py"
+
 step "Legacy meta preview via Python" bash -c '
   cd "'"$APP"'/sidecar"
   uv run python - <<PY

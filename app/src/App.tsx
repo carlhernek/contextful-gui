@@ -11,7 +11,9 @@ import { ResultsView } from "./components/ResultsView";
 import { EventLogPanel } from "./components/EventLogPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { ModulesVersionBadge } from "./components/ModulesVersionBadge";
+import { ActivityIndicator } from "./components/ActivityIndicator";
 import { Spinner } from "./components/Spinner";
+import { JobsProvider } from "./lib/jobs";
 
 type Tab = "chat" | "pipeline" | "meta" | "repos" | "results" | "logs";
 
@@ -71,6 +73,7 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
             {active && <ModulesVersionBadge projectId={active.id} />}
           </div>
           <div className="flex items-center gap-3">
+            <ActivityIndicator />
             {(["chat", "pipeline", "meta", "repos", "results", "logs"] as Tab[]).map((t) => (
               <button
                 key={t}
@@ -190,5 +193,9 @@ export default function App() {
     );
   }
 
-  return <WorkspaceView status={status} onReset={() => setForceSetup(true)} />;
+  return (
+    <JobsProvider>
+      <WorkspaceView status={status} onReset={() => setForceSetup(true)} />
+    </JobsProvider>
+  );
 }

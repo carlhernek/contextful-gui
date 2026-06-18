@@ -26,7 +26,7 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
   const [keywords, setKeywords] = useState<string[]>([]);
   const [keywordInput, setKeywordInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -63,7 +63,7 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
   };
 
   const save = async () => {
-    setBusy("save");
+    setBusy(true);
     setError(null);
     try {
       await api.setIndexAnnotation(projectId, itemId, description.trim(), keywords);
@@ -71,24 +71,7 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
     } catch (e) {
       setError(String(e));
     } finally {
-      setBusy(null);
-    }
-  };
-
-  const regenerate = async () => {
-    setBusy("regen");
-    setError(null);
-    try {
-      await api.enrichIndexItem(projectId, itemId);
-      const found = await api.readIndexItem(projectId, itemId);
-      setItem(found);
-      setMissingFromIndex(false);
-      setDescription(found.description ?? "");
-      setKeywords(found.keywords ?? []);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(null);
+      setBusy(false);
     }
   };
 
@@ -119,8 +102,8 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
           <div className="flex-1 space-y-3 overflow-y-auto">
             {missingFromIndex && (
               <p className="rounded-md border border-cf-border bg-cf-surface-2 px-3 py-2 text-xs text-cf-muted">
-                Index not built yet for this item. Use <strong>Refresh index</strong> on the
-                Repositories tab, or save a manual description below.
+                Not indexed yet — built automatically after repo/meta changes and pipeline runs.
+                You can still add a manual description and keywords below.
               </p>
             )}
 
@@ -185,25 +168,17 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
             type="button"
             className="rounded-md border border-cf-border px-3 py-1.5 text-sm text-cf-ink hover:bg-cf-surface-2"
             onClick={onClose}
-            disabled={busy !== null}
+            disabled={busy}
           >
             Cancel
           </button>
           <button
             type="button"
-            className="rounded-md border border-cf-border px-3 py-1.5 text-sm text-cf-ink hover:bg-cf-surface-2"
-            onClick={() => void regenerate()}
-            disabled={busy !== null || loading}
-          >
-            {busy === "regen" ? <Spinner size={12} /> : "Regenerate with AI"}
-          </button>
-          <button
-            type="button"
             className="rounded-md bg-cf-accent px-3 py-1.5 text-sm font-medium text-cf-accent-ink hover:opacity-90"
             onClick={() => void save()}
-            disabled={busy !== null || loading}
+            disabled={busy || loading}
           >
-            {busy === "save" ? <Spinner size={12} /> : "Save"}
+            {busy ? <Spinner size={12} /> : "Save"}
           </button>
         </div>
       </div>

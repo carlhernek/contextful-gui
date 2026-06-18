@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, onContextfulEvent, type RunState } from "../lib/ipc";
+import { useJob } from "../lib/jobs";
 import { statusBannerClass } from "../lib/statusStyles";
 import { Spinner } from "./Spinner";
 
@@ -17,7 +18,7 @@ interface Props {
 }
 
 export function RunPanel({ projectId, selected, onComplete }: Props) {
-  const [running, setRunning] = useState(false);
+  const { busy: running, stop, isBusy } = useJob("run", projectId);
   const [runId, setRunId] = useState<string | null>(null);
   const [currentModule, setCurrentModule] = useState<string | null>(null);
   const [turn, setTurn] = useState<{ turn: number; maxTurns: number } | null>(null);
@@ -51,7 +52,6 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
     return () => unlisten?.();
   }, []);
 
-  // Stall detection + run-state poll backstop.
   useEffect(() => {
     if (!running) return;
     const stallTimer = setInterval(() => {
@@ -76,7 +76,7 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
   }, [running, runId, projectId]);
 
   const start = async () => {
-    if (!selected.length) return;
+    if (!selected.length || isBusy) return;
     setError(null);
     setResult(null);
     setCompleted([]);
@@ -85,7 +85,6 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
     lastActivity.current = Date.now();
     const id = await api.newRunId();
     setRunId(id);
-    setRunning(true);
     try {
       const state = await api.startRun({
         id: projectId,
@@ -100,14 +99,9 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
     } catch (e) {
       setError(String(e));
     } finally {
-      setRunning(false);
       setStall(null);
       setCurrentModule(null);
     }
-  };
-
-  const stop = async () => {
-    await api.stopRun();
   };
 
   return (
@@ -132,21 +126,25 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
         {!running ? (
           <button
             className="rounded-md bg-cf-success px-4 py-1.5 text-sm font-medium text-cf-bg hover:opacity-90 disabled:opacity-40"
-            disabled={!selected.length}
-            onClick={start}
+            disabled={!selected.length || isBusy}
+            onClick={() => void start()}
           >
             Start run ({selected.length} modules)
           </button>
         ) : (
           <button
             className="rounded-md bg-cf-danger px-4 py-1.5 text-sm font-medium text-white hover:opacity-90"
-            onClick={stop}
+            onClick={() => void stop()}
           >
             Stop
           </button>
         )}
         {running && <Spinner size={14} />}
       </div>
+
+      {isBusy && !running && (
+        <p className="mt-2 text-xs text-cf-muted">Another operation is in progress.</p>
+      )}
 
       {running && (
         <div className="mt-3 space-y-1 text-sm">

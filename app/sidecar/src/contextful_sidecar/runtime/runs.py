@@ -23,6 +23,7 @@ _TRANSIENT_MARKERS = ("ssl", "certificate", "timeout", "timed out", "connection"
 
 RUN_STATE_FILE = ".run-state.json"
 TEMPLATE_VERSION_FILE = "modules/template-version.txt"
+WORKSPACE_INDEX_MODULE = "workspace-index"
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -81,15 +82,23 @@ def filter_modules(workspace: Path, run_id: str, selected: list[str],
     if force:
         save_run_state(workspace, run_id, status="idle", completedModules=[],
                        failedModule=None, error=None)
-        return {"to_run": list(selected), "alreadyComplete": False}
+        return {"to_run": _order_modules(list(selected)), "alreadyComplete": False}
 
     if resume and status in {"failed", "cancelled", "running", "complete"}:
         to_run = [m for m in selected if m not in completed]
         if not to_run:
             return {"to_run": [], "alreadyComplete": True}
-        return {"to_run": to_run, "alreadyComplete": False}
+        return {"to_run": _order_modules(to_run), "alreadyComplete": False}
 
-    return {"to_run": list(selected), "alreadyComplete": False}
+    return {"to_run": _order_modules(list(selected)), "alreadyComplete": False}
+
+
+def _order_modules(modules: list[str]) -> list[str]:
+    """Run workspace-index last so analysis modules finish before index rebuild."""
+    regular = [m for m in modules if m != WORKSPACE_INDEX_MODULE]
+    if WORKSPACE_INDEX_MODULE in modules:
+        regular.append(WORKSPACE_INDEX_MODULE)
+    return regular
 
 
 # --- module discovery -----------------------------------------------------
@@ -173,14 +182,23 @@ async def run_modules(
 
         on_event("module", {"module": module_id, "status": "START"})
         append_eventlog(ws, module_id, "START", f"modules={version}")
-        model = models.get(module_id) or models.get("module") or models["module"]
 
-        summary, error = await _run_module_with_retry(
-            ws=ws, skill=skill, model=model, client=client, role=role, module_id=module_id,
-            run_id=run_id, repo_paths=repo_paths, meta_docs=meta_docs,
-            project_type=project_type, specific_instructions=specific_instructions,
-            on_event=on_event, should_cancel=should_cancel,
-        )
+        if module_id == WORKSPACE_INDEX_MODULE:
+            summary, error = await _run_workspace_index(
+                ws=ws,
+                client=client,
+                models=models,
+                on_event=on_event,
+                should_cancel=should_cancel,
+            )
+        else:
+            model = models.get(module_id) or models.get("module") or models["module"]
+            summary, error = await _run_module_with_retry(
+                ws=ws, skill=skill, model=model, client=client, role=role, module_id=module_id,
+                run_id=run_id, repo_paths=repo_paths, meta_docs=meta_docs,
+                project_type=project_type, specific_instructions=specific_instructions,
+                on_event=on_event, should_cancel=should_cancel,
+            )
 
         if should_cancel():
             save_run_state(ws, run_id, status="cancelled")
@@ -203,17 +221,46 @@ async def run_modules(
     append_eventlog(ws, "run", "SUCCESS", f"runId={run_id} completed {len(completed)} modules")
     _write_run_summary(ws, run_id, completed, project_type, version)
     on_event("run", {"runId": run_id, "status": "complete", "completedModules": completed})
+    if WORKSPACE_INDEX_MODULE not in completed:
+        try:
+            await refresh_index(
+                workspace=ws,
+                client=client,
+                models=models,
+                on_event=on_event,
+                should_cancel=should_cancel,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return {"runId": run_id, "status": "complete", "completedModules": completed}
+
+
+async def _run_workspace_index(
+    *,
+    ws: Path,
+    client: OpenRouterClient,
+    models: dict[str, str],
+    on_event: EventCallback,
+    should_cancel: CancelCheck,
+) -> tuple[str, str | None]:
+    if should_cancel():
+        return "", "cancelled"
     try:
-        await refresh_index(
+        result = await refresh_index(
             workspace=ws,
             client=client,
             models=models,
             on_event=on_event,
             should_cancel=should_cancel,
         )
-    except Exception:  # noqa: BLE001
-        pass
-    return {"runId": run_id, "status": "complete", "completedModules": completed}
+        if should_cancel():
+            return "", "cancelled"
+        count = result.get("itemCount", 0)
+        return f"Indexed {count} items", None
+    except asyncio.CancelledError:
+        return "", "cancelled"
+    except Exception as exc:  # noqa: BLE001
+        return "", str(exc)
 
 
 async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, run_id,

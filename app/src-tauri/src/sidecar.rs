@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Runtime};
 
-const EVENT_NAME: &str = "contextful-event";
+pub const EVENT_NAME: &str = "contextful-event";
 
 #[derive(Clone, Serialize)]
 pub struct SidecarEvent {
@@ -30,6 +30,7 @@ pub struct SidecarManager {
     stdin: Mutex<Option<ChildStdin>>,
     events_rx: Mutex<Option<Receiver<Value>>>,
     cancel_flag: Arc<AtomicBool>,
+    request_lock: Mutex<()>,
 }
 
 impl SidecarManager {
@@ -40,6 +41,7 @@ impl SidecarManager {
             stdin: Mutex::new(None),
             events_rx: Mutex::new(None),
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            request_lock: Mutex::new(()),
         }
     }
 
@@ -133,6 +135,7 @@ impl SidecarManager {
         method: &str,
         params: Value,
     ) -> Result<Value> {
+        let _guard = self.request_lock.lock().unwrap();
         self.start()?;
         self.cancel_flag.store(false, Ordering::SeqCst);
 

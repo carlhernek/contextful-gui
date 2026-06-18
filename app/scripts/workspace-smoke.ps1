@@ -75,6 +75,30 @@ Step "Sidecar preview pytest" {
     return ($code -eq 0)
 }
 
+Step "Workspace index module pytest" {
+    Push-Location "$App\sidecar"
+    uv run pytest tests/test_workspace_index.py -q 2>&1 | Out-Host
+    $code = $LASTEXITCODE
+    Pop-Location
+    return ($code -eq 0)
+}
+
+Step "Legacy project index pytest (v1.0.0, v1.1.0)" {
+    Push-Location "$App\sidecar"
+    uv run pytest tests/test_legacy_index.py -q 2>&1 | Out-Host
+    $code = $LASTEXITCODE
+    Pop-Location
+    return ($code -eq 0)
+}
+
+Step "Legacy project index smoke (v1.0.0, v1.1.0)" {
+    Push-Location "$App\sidecar"
+    uv run python ..\scripts\legacy-project-smoke.py 2>&1 | Out-Host
+    $code = $LASTEXITCODE
+    Pop-Location
+    return ($code -eq 0)
+}
+
 Step "Legacy meta preview via Python" {
     Push-Location "$App\sidecar"
     $code = @"

@@ -488,27 +488,6 @@ async def refresh_index(
     return {"ok": True, "itemCount": len(merged), "enriched": enriched, "updatedAt": doc["updatedAt"]}
 
 
-async def enrich_index_item(
-    *,
-    workspace: str | Path,
-    item_id: str,
-    client: OpenRouterClient,
-    models: dict[str, str] | None = None,
-    on_event: EventCallback | None = None,
-    should_cancel: CancelCheck | None = None,
-) -> dict[str, Any]:
-    return await refresh_index(
-        workspace=workspace,
-        client=client,
-        models=models,
-        on_event=on_event,
-        should_cancel=should_cancel,
-        skip_enrichment=False,
-        force_item_ids=[item_id],
-        force_enrich=True,
-    )
-
-
 def format_index_for_prompt(index: dict[str, Any]) -> str:
     items = index.get("items") or []
     if not items:

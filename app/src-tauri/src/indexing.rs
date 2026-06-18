@@ -148,6 +148,50 @@ mod tests {
     }
 
     #[test]
+    fn legacy_project_index_lazy_compat() {
+        let tmp = tempdir().unwrap();
+        let project = tmp.path().join("projects/legacy-1-0-0");
+        fs::create_dir_all(project.join("meta")).unwrap();
+        write_meta(
+            &project,
+            &ProjectMeta {
+                display_name: "Legacy 1.0.0".to_string(),
+                project_type: "both".to_string(),
+                repos: vec![crate::workspace::RepoEntry {
+                    name: "backoffice".to_string(),
+                    url: String::new(),
+                    branch: "develop".to_string(),
+                }],
+                models: serde_json::Map::new(),
+                deleted: false,
+            },
+        )
+        .unwrap();
+        fs::write(project.join("meta/requirements.md"), "# req").unwrap();
+        fs::create_dir_all(project.join("modules")).unwrap();
+        fs::write(project.join("modules/template-version.txt"), "1.0.0").unwrap();
+        fs::create_dir_all(project.join("runs/old/m")).unwrap();
+        fs::write(project.join("runs/old/m/analysis.md"), "ok").unwrap();
+
+        assert!(!project.join(INDEX_FILE).exists());
+        assert!(!project.join(ANNOTATIONS_FILE).exists());
+
+        let index = get_index(&project).unwrap();
+        assert_eq!(index["items"].as_array().unwrap().len(), 0);
+
+        set_annotation(&project, "meta:requirements.md", "User note", &["req".into()]).unwrap();
+        assert!(project.join(ANNOTATIONS_FILE).exists());
+        assert!(!project.join(INDEX_FILE).exists());
+
+        let meta_before = fs::read_to_string(project.join("meta/requirements.md")).unwrap();
+        crate::workspace::touch_project(&project);
+        assert_eq!(
+            fs::read_to_string(project.join("meta/requirements.md")).unwrap(),
+            meta_before
+        );
+    }
+
+    #[test]
     fn annotations_survive_index_overwrite() {
         let (_tmp, project) = fixture_project();
         set_annotation(&project, "meta:req.md", "Requirements doc", &["req".into()]).unwrap();

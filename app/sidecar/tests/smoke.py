@@ -16,6 +16,10 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
 from contextful_sidecar.runtime import tools  # noqa: E402
 from contextful_sidecar.runtime.agents import (  # noqa: E402
     compose_module_prompt,
@@ -25,7 +29,14 @@ from contextful_sidecar.runtime.agents import (  # noqa: E402
 from contextful_sidecar.runtime.chat import detect_run_intent  # noqa: E402
 from contextful_sidecar.runtime.runs import filter_modules, save_run_state  # noqa: E402
 from contextful_sidecar.runtime.schema import validate_tasks  # noqa: E402
+from contextful_sidecar.runtime.indexing import INDEX_FILE, refresh_index  # noqa: E402
 from contextful_sidecar.server import SidecarServer, _write_json  # noqa: E402
+from legacy_fixture import (  # noqa: E402
+    LEGACY_PROJECT_VERSIONS,
+    assert_legacy_files_preserved,
+    build_legacy_project,
+    snapshot_text_files,
+)
 
 PASS = FAIL = 0
 
@@ -194,18 +205,43 @@ async def test_server_async() -> None:
               "result" in refresh and "unknown method" not in str(refresh.get("error", "")))
         check("refresh_index creates index file", (ws / ".workspace-index.json").exists())
 
-        enrich = await srv.handle({
-            "id": "ei", "method": "enrich_index_item",
-            "params": {"workspace": ws_str, "itemId": "repo:web"},
-        })
-        check("enrich_index_item dispatches",
-              "unknown method" not in str(enrich.get("error", "")))
-
         preview = await srv.handle({
             "id": "pv", "method": "preview",
             "params": {"workspace": ws_str, "path": "README.md", "base": "repos/web"},
         })
         check("preview dispatches", "result" in preview and preview["result"].get("ok"))
+
+
+async def test_legacy_projects_async() -> None:
+    srv = SidecarServer()
+    await srv.handle({"id": "lc", "method": "configure", "params": {"api_key": "fake"}})
+
+    for template_version in LEGACY_PROJECT_VERSIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = build_legacy_project(Path(tmp), template_version=template_version)
+            before = snapshot_text_files(
+                project,
+                (
+                    ".contextful.json",
+                    "meta/**",
+                    "modules/**",
+                    "runs/**",
+                    ".eventlog",
+                    ".chatlog.json",
+                ),
+            )
+            ws_str = str(project)
+            refresh = await srv.handle({
+                "id": f"lr-{template_version}",
+                "method": "refresh_index",
+                "params": {"workspace": ws_str, "skipEnrichment": True},
+            })
+            label = f"legacy {template_version} refresh_index"
+            check(f"{label} dispatches",
+                  "result" in refresh and "unknown method" not in str(refresh.get("error", "")))
+            check(f"{label} ok", refresh.get("result", {}).get("ok") is True)
+            check(f"{label} creates index", (project / INDEX_FILE).exists())
+            assert_legacy_files_preserved(project, snapshot=before)
 
 
 def main() -> int:
@@ -220,6 +256,7 @@ def main() -> int:
         test_intent()
         test_write_json()
         asyncio.run(test_server_async())
+        asyncio.run(test_legacy_projects_async())
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

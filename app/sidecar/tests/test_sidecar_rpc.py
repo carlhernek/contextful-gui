@@ -21,7 +21,6 @@ REQUIRED_RPC_METHODS = frozenset({
     "chat",
     "preview",
     "refresh_index",
-    "enrich_index_item",
 })
 
 # Implemented in server.py handle() dispatch (excluding cancel which is special).
@@ -34,7 +33,6 @@ IMPLEMENTED_METHODS = frozenset({
     "chat",
     "preview",
     "refresh_index",
-    "enrich_index_item",
 })
 
 
@@ -84,13 +82,6 @@ def test_index_rpc_methods_dispatch():
             _assert_not_unknown(refresh)
             assert refresh.get("result", {}).get("ok") is True
             assert (ws / ".workspace-index.json").exists()
-
-            enrich = await srv.handle({
-                "id": "e1",
-                "method": "enrich_index_item",
-                "params": {"workspace": ws_str, "itemId": "repo:web"},
-            })
-            _assert_not_unknown(enrich)
 
             preview = await srv.handle({
                 "id": "p1",

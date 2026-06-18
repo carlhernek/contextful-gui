@@ -142,6 +142,14 @@ export interface WorkspaceIndex {
   items: IndexItem[];
 }
 
+export interface JobInfo {
+  key: string;
+  kind: "run" | "index" | "clone" | "pull";
+  projectId: string;
+  label: string;
+  startedAt: string;
+}
+
 /** Listen for streamed sidecar events; returns an unlisten fn. */
 export async function onContextfulEvent(handler: (e: SidecarEvent) => void) {
   return listen<SidecarEvent>("contextful-event", (e) => handler(e.payload));
@@ -235,6 +243,8 @@ export const api = {
       specificInstructions: args.specificInstructions ?? null,
     }),
   stopRun: () => invoke<void>("stop_run"),
+  stopJob: () => invoke<void>("stop_job"),
+  listJobs: () => invoke<JobInfo[]>("list_jobs"),
 
   pullProjectModules: (id: string) => invoke<{ ok: boolean; version: string }>("pull_project_modules", { id }),
   getModulesVersionStatus: (id: string, fetch: boolean) =>
@@ -251,12 +261,5 @@ export const api = {
       itemId,
       description,
       keywords,
-    }),
-  refreshIndex: (id: string) =>
-    invoke<{ ok: boolean; itemCount: number; enriched: number }>("refresh_index", { id }),
-  enrichIndexItem: (id: string, itemId: string) =>
-    invoke<{ ok: boolean; itemCount: number; enriched: number }>("enrich_index_item", {
-      id,
-      itemId,
     }),
 };

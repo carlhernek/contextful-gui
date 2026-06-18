@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type RepoStatus } from "../lib/ipc";
+import { useJob } from "../lib/jobs";
 import { IndexButton } from "./IndexButton";
 import { Spinner } from "./Spinner";
 
@@ -8,9 +9,12 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [branch, setBranch] = useState("develop");
-  const [busy, setBusy] = useState<string | null>(null);
+  const [pullTarget, setPullTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [indexBusy, setIndexBusy] = useState(false);
+  const { busy: cloneBusy } = useJob("clone", projectId);
+  const { busy: pullBusy } = useJob("pull", projectId);
+  const { isBusy } = useJob(undefined, projectId);
+  const repoBusy = cloneBusy || pullBusy || isBusy;
 
   const refresh = async () => setRepos(await api.listRepos(projectId));
 
@@ -33,19 +37,18 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
   };
 
   const runClone = async () => {
-    setBusy("clone");
     setError(null);
     try {
       const res = await api.cloneRepos(projectId);
       reportFailures(res.results as { ok: boolean; error?: string; kind?: string }[]);
       await refresh();
-    } finally {
-      setBusy(null);
+    } catch (e) {
+      setError(String(e));
     }
   };
 
   const runPull = async (repoName?: string) => {
-    setBusy(repoName ?? "pull-all");
+    setPullTarget(repoName ?? "pull-all");
     setError(null);
     try {
       const res = await api.pullRepos(projectId);
@@ -53,8 +56,10 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
       const filtered = repoName ? results.filter((r) => r.name === repoName) : results;
       reportFailures(filtered);
       await refresh();
+    } catch (e) {
+      setError(String(e));
     } finally {
-      setBusy(null);
+      setPullTarget(null);
     }
   };
 
@@ -104,6 +109,7 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
           type="button"
           className="rounded-md border border-cf-border px-3 text-sm text-cf-ink hover:bg-cf-surface-2"
           onClick={() => void add()}
+          disabled={repoBusy}
         >
           Add
         </button>
@@ -122,7 +128,7 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
               <div className="truncate text-xs text-cf-muted">{r.url}</div>
             </div>
             <div className="flex items-center gap-2">
-              <IndexButton projectId={projectId} itemId={`repo:${r.name}`} disabled={busy !== null} />
+              <IndexButton projectId={projectId} itemId={`repo:${r.name}`} disabled={repoBusy} />
               <span className={r.cloned ? "text-cf-success" : "text-cf-muted"}>
                 {r.cloned ? "cloned" : "not cloned"}
               </span>
@@ -130,15 +136,16 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
                 <button
                   type="button"
                   className="rounded border border-cf-border px-2 py-0.5 text-xs text-cf-ink hover:bg-cf-surface"
-                  disabled={busy !== null}
+                  disabled={repoBusy}
                   onClick={() => void runPull(r.name)}
                 >
-                  {busy === r.name ? <Spinner size={10} /> : `Pull origin/${r.branch}`}
+                  {pullTarget === r.name ? <Spinner size={10} /> : `Pull origin/${r.branch}`}
                 </button>
               )}
               <button
                 type="button"
                 className="text-cf-danger"
+                disabled={repoBusy}
                 onClick={async () => {
                   await api.removeRepo(projectId, r.name);
                   await refresh();
@@ -155,37 +162,19 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
         <div className="mt-3 flex gap-2">
           <button
             type="button"
-            className="flex items-center gap-2 rounded-md bg-cf-accent px-3 py-1.5 text-sm font-medium text-cf-accent-ink hover:opacity-90"
+            className="flex items-center gap-2 rounded-md bg-cf-accent px-3 py-1.5 text-sm font-medium text-cf-accent-ink hover:opacity-90 disabled:opacity-40"
             onClick={() => void runClone()}
-            disabled={busy !== null}
+            disabled={repoBusy}
           >
-            {busy === "clone" && <Spinner size={12} />} Clone all
+            {cloneBusy && <Spinner size={12} />} Clone all
           </button>
           <button
             type="button"
-            className="flex items-center gap-2 rounded-md border border-cf-border px-3 py-1.5 text-sm text-cf-ink hover:bg-cf-surface-2"
+            className="flex items-center gap-2 rounded-md border border-cf-border px-3 py-1.5 text-sm text-cf-ink hover:bg-cf-surface-2 disabled:opacity-40"
             onClick={() => void runPull()}
-            disabled={busy !== null}
+            disabled={repoBusy}
           >
-            {busy === "pull-all" && <Spinner size={12} />} Pull all
-          </button>
-          <button
-            type="button"
-            className="flex items-center gap-2 rounded-md border border-cf-border px-3 py-1.5 text-sm text-cf-ink hover:bg-cf-surface-2"
-            onClick={async () => {
-              setIndexBusy(true);
-              setError(null);
-              try {
-                await api.refreshIndex(projectId);
-              } catch (e) {
-                setError(String(e));
-              } finally {
-                setIndexBusy(false);
-              }
-            }}
-            disabled={busy !== null || indexBusy}
-          >
-            {indexBusy && <Spinner size={12} />} Refresh index
+            {pullTarget === "pull-all" && <Spinner size={12} />} Pull all
           </button>
         </div>
       )}

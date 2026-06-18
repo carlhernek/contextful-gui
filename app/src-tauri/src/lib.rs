@@ -1,6 +1,7 @@
 //! Contextful Tauri core: command surface + app wiring (spec section 10).
 
 mod indexing;
+mod jobs;
 mod prereqs;
 mod secrets;
 mod settings;
@@ -10,6 +11,7 @@ mod workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use jobs::{busy_error, JobKind, JobManager};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -18,6 +20,7 @@ use sidecar::SidecarManager;
 
 pub struct AppState {
     pub sidecar: Arc<SidecarManager>,
+    pub jobs: Arc<JobManager>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -188,12 +191,21 @@ fn remove_repo(app: AppHandle, id: String, name: String) -> CmdResult<()> {
 
 #[tauri::command]
 async fn clone_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
+    let guard = state
+        .jobs
+        .try_begin(&app, JobKind::Clone, &id, "Cloning repositories")
+        .map_err(busy_error)?;
     let install = install_path(&app)?;
     let project_id = id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || workspace::clone_repos(&install, &id))
+    let clone_result = tauri::async_runtime::spawn_blocking(move || workspace::clone_repos(&install, &id))
         .await
         .map_err(err)?
-        .map_err(err)?;
+        .map_err(err);
+    if clone_result.is_err() {
+        guard.fail();
+    }
+    drop(guard);
+    let result = clone_result?;
     let index_warning = trigger_index_refresh_or_warn(app, &state, &project_id, false).await;
     Ok(attach_index_warning(result, index_warning))
 }
@@ -206,12 +218,21 @@ fn list_repos(app: AppHandle, id: String) -> CmdResult<Vec<Value>> {
 
 #[tauri::command]
 async fn pull_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
+    let guard = state
+        .jobs
+        .try_begin(&app, JobKind::Pull, &id, "Pulling repositories")
+        .map_err(busy_error)?;
     let install = install_path(&app)?;
     let project_id = id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || workspace::pull_repos(&install, &id))
+    let pull_result = tauri::async_runtime::spawn_blocking(move || workspace::pull_repos(&install, &id))
         .await
         .map_err(err)?
-        .map_err(err)?;
+        .map_err(err);
+    if pull_result.is_err() {
+        guard.fail();
+    }
+    drop(guard);
+    let result = pull_result?;
     let index_warning = trigger_index_refresh_or_warn(app, &state, &project_id, false).await;
     Ok(attach_index_warning(result, index_warning))
 }
@@ -383,16 +404,31 @@ async fn trigger_index_refresh(
     project_id: &str,
     skip_enrichment: bool,
 ) -> CmdResult<()> {
-    ensure_configured(&app, &state, Some(project_id)).await?;
-    let workspace = project_workspace(&app, project_id)?;
-    let _ = rpc(
-        app.clone(),
-        state.sidecar.clone(),
-        "refresh_index",
-        json!({"workspace": workspace, "skipEnrichment": skip_enrichment}),
-    )
-    .await?;
-    Ok(())
+    let Some(guard) = state.jobs.try_begin_or_skip(
+        &app,
+        JobKind::Index,
+        project_id,
+        "Indexing workspace",
+    ) else {
+        return Ok(());
+    };
+    let result = async {
+        ensure_configured(&app, state, Some(project_id)).await?;
+        let workspace = project_workspace(&app, project_id)?;
+        let _ = rpc(
+            app.clone(),
+            state.sidecar.clone(),
+            "refresh_index",
+            json!({"workspace": workspace, "skipEnrichment": skip_enrichment}),
+        )
+        .await?;
+        Ok::<(), String>(())
+    }
+    .await;
+    if result.is_err() {
+        guard.fail();
+    }
+    result
 }
 
 async fn trigger_index_refresh_or_warn(
@@ -401,6 +437,18 @@ async fn trigger_index_refresh_or_warn(
     project_id: &str,
     skip_enrichment: bool,
 ) -> Option<String> {
+    if state.jobs.current().is_some() {
+        if let Ok(install) = install_path(&app) {
+            let project = workspace::project_dir(&install, project_id);
+            workspace::append_eventlog(
+                &project,
+                "index",
+                "SKIP",
+                "index refresh skipped — another job is active",
+            );
+        }
+        return None;
+    }
     match trigger_index_refresh(app.clone(), state, project_id, skip_enrichment).await {
         Ok(()) => None,
         Err(e) => {
@@ -425,6 +473,17 @@ fn attach_index_warning(mut value: Value, warning: Option<String>) -> Value {
         }
     }
     value
+}
+
+#[tauri::command]
+fn list_jobs(state: State<'_, AppState>) -> Vec<jobs::Job> {
+    state.jobs.snapshot()
+}
+
+#[tauri::command]
+fn stop_job(state: State<'_, AppState>) -> CmdResult<()> {
+    state.sidecar.cancel();
+    Ok(())
 }
 
 #[tauri::command]
@@ -454,39 +513,8 @@ async fn set_index_annotation(
     let install = install_path(&app)?;
     let project = workspace::project_dir(&install, &id);
     let ann = indexing::set_annotation(&project, &item_id, &description, &keywords).map_err(err)?;
-    let _ = trigger_index_refresh(app, &state, &id, true).await;
+    let _ = trigger_index_refresh_or_warn(app, &state, &id, true).await;
     Ok(json!(ann))
-}
-
-#[tauri::command]
-async fn refresh_index(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
-    ensure_configured(&app, &state, Some(&id)).await?;
-    let workspace = project_workspace(&app, &id)?;
-    rpc(
-        app,
-        state.sidecar.clone(),
-        "refresh_index",
-        json!({"workspace": workspace, "skipEnrichment": false}),
-    )
-    .await
-}
-
-#[tauri::command]
-async fn enrich_index_item(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-    item_id: String,
-) -> CmdResult<Value> {
-    ensure_configured(&app, &state, Some(&id)).await?;
-    let workspace = project_workspace(&app, &id)?;
-    rpc(
-        app,
-        state.sidecar.clone(),
-        "enrich_index_item",
-        json!({"workspace": workspace, "itemId": item_id}),
-    )
-    .await
 }
 
 #[tauri::command]
@@ -528,10 +556,14 @@ async fn start_run(
     specific_instructions: Option<String>,
 ) -> CmdResult<Value> {
     ensure_configured(&app, &state, Some(&id)).await?;
+    let guard = state
+        .jobs
+        .try_begin(&app, JobKind::Run, &id, "Running pipeline")
+        .map_err(busy_error)?;
     let workspace = project_workspace(&app, &id)?;
     let install = install_path(&app)?;
     let meta = workspace::read_meta(&workspace::project_dir(&install, &id)).map_err(err)?;
-    rpc(
+    let result = rpc(
         app,
         state.sidecar.clone(),
         "run_modules",
@@ -545,7 +577,11 @@ async fn start_run(
             "specific_instructions": specific_instructions,
         }),
     )
-    .await
+    .await;
+    if result.is_err() {
+        guard.fail();
+    }
+    result
 }
 
 #[tauri::command]
@@ -577,6 +613,7 @@ pub fn run() {
     let sidecar_dir = sidecar_dir();
     let state = AppState {
         sidecar: Arc::new(SidecarManager::new(sidecar_dir)),
+        jobs: Arc::new(JobManager::new()),
     };
 
     tauri::Builder::default()
@@ -643,8 +680,8 @@ pub fn run() {
             get_index,
             read_index_item,
             set_index_annotation,
-            refresh_index,
-            enrich_index_item
+            list_jobs,
+            stop_job
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

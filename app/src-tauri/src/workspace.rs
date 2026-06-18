@@ -1028,6 +1028,10 @@ mod tests {
         assert!(load_chatlog(&project).is_empty());
         let runs = list_runs(install, "legacy");
         assert!(!runs.is_empty());
+
+        let index = crate::indexing::get_index(&project).unwrap();
+        assert_eq!(index["items"].as_array().unwrap().len(), 0);
+        assert!(!project.join(crate::indexing::INDEX_FILE).exists());
     }
 
     #[test]

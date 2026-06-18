@@ -1,5 +1,6 @@
 //! Contextful Tauri core: command surface + app wiring (spec section 10).
 
+mod indexing;
 mod prereqs;
 mod secrets;
 mod settings;
@@ -186,12 +187,15 @@ fn remove_repo(app: AppHandle, id: String, name: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-async fn clone_repos(app: AppHandle, id: String) -> CmdResult<Value> {
+async fn clone_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
     let install = install_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || workspace::clone_repos(&install, &id))
+    let project_id = id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || workspace::clone_repos(&install, &id))
         .await
         .map_err(err)?
-        .map_err(err)
+        .map_err(err)?;
+    let _ = trigger_index_refresh(app, &state, &project_id, false).await;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -201,19 +205,29 @@ fn list_repos(app: AppHandle, id: String) -> CmdResult<Vec<Value>> {
 }
 
 #[tauri::command]
-async fn pull_repos(app: AppHandle, id: String) -> CmdResult<Value> {
+async fn pull_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
     let install = install_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || workspace::pull_repos(&install, &id))
+    let project_id = id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || workspace::pull_repos(&install, &id))
         .await
         .map_err(err)?
-        .map_err(err)
+        .map_err(err)?;
+    let _ = trigger_index_refresh(app, &state, &project_id, false).await;
+    Ok(result)
 }
 
 // ===== meta docs ==========================================================
 #[tauri::command]
-fn upload_meta_files(app: AppHandle, id: String, sources: Vec<String>) -> CmdResult<Vec<String>> {
+async fn upload_meta_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    sources: Vec<String>,
+) -> CmdResult<Vec<String>> {
     let install = install_path(&app)?;
-    workspace::upload_meta_files(&install, &id, &sources).map_err(err)
+    let uploaded = workspace::upload_meta_files(&install, &id, &sources).map_err(err)?;
+    let _ = trigger_index_refresh(app, &state, &id, false).await;
+    Ok(uploaded)
 }
 
 #[tauri::command]
@@ -223,9 +237,16 @@ fn list_meta_dir(app: AppHandle, id: String, rel_path: Option<String>) -> CmdRes
 }
 
 #[tauri::command]
-fn delete_meta_entry(app: AppHandle, id: String, path: String) -> CmdResult<()> {
+async fn delete_meta_entry(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> CmdResult<()> {
     let install = install_path(&app)?;
-    workspace::delete_meta_entry(&install, &id, &path).map_err(err)
+    workspace::delete_meta_entry(&install, &id, &path).map_err(err)?;
+    let _ = trigger_index_refresh(app, &state, &id, false).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -354,6 +375,86 @@ async fn ensure_configured(
     rpc(app.clone(), state.sidecar.clone(), "configure",
         json!({"api_key": key, "models": models})).await?;
     Ok(())
+}
+
+async fn trigger_index_refresh(
+    app: AppHandle,
+    state: &State<'_, AppState>,
+    project_id: &str,
+    skip_enrichment: bool,
+) -> CmdResult<()> {
+    ensure_configured(&app, &state, Some(project_id)).await?;
+    let workspace = project_workspace(&app, project_id)?;
+    let _ = rpc(
+        app.clone(),
+        state.sidecar.clone(),
+        "refresh_index",
+        json!({"workspace": workspace, "skipEnrichment": skip_enrichment}),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_index(app: AppHandle, id: String) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    indexing::get_index(&workspace::project_dir(&install, &id)).map_err(err)
+}
+
+#[tauri::command]
+async fn read_index_item(app: AppHandle, id: String, item_id: String) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    match indexing::read_index_item(&workspace::project_dir(&install, &id), &item_id).map_err(err)? {
+        Some(item) => Ok(item),
+        None => Err(format!("index item not found: {item_id}")),
+    }
+}
+
+#[tauri::command]
+async fn set_index_annotation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    item_id: String,
+    description: String,
+    keywords: Vec<String>,
+) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    let ann = indexing::set_annotation(&project, &item_id, &description, &keywords).map_err(err)?;
+    let _ = trigger_index_refresh(app, &state, &id, true).await;
+    Ok(json!(ann))
+}
+
+#[tauri::command]
+async fn refresh_index(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
+    ensure_configured(&app, &state, Some(&id)).await?;
+    let workspace = project_workspace(&app, &id)?;
+    rpc(
+        app,
+        state.sidecar.clone(),
+        "refresh_index",
+        json!({"workspace": workspace, "skipEnrichment": false}),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn enrich_index_item(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    item_id: String,
+) -> CmdResult<Value> {
+    ensure_configured(&app, &state, Some(&id)).await?;
+    let workspace = project_workspace(&app, &id)?;
+    rpc(
+        app,
+        state.sidecar.clone(),
+        "enrich_index_item",
+        json!({"workspace": workspace, "itemId": item_id}),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -506,7 +607,12 @@ pub fn run() {
             new_run_id,
             pull_project_modules,
             get_modules_version_status,
-            preview_file
+            preview_file,
+            get_index,
+            read_index_item,
+            set_index_annotation,
+            refresh_index,
+            enrich_index_item
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

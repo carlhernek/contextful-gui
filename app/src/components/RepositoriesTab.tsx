@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type RepoStatus } from "../lib/ipc";
+import { IndexButton } from "./IndexButton";
 import { Spinner } from "./Spinner";
 
 export function RepositoriesTab({ projectId }: { projectId: string }) {
@@ -9,6 +10,7 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
   const [branch, setBranch] = useState("develop");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [indexBusy, setIndexBusy] = useState(false);
 
   const refresh = async () => setRepos(await api.listRepos(projectId));
 
@@ -120,6 +122,7 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
               <div className="truncate text-xs text-cf-muted">{r.url}</div>
             </div>
             <div className="flex items-center gap-2">
+              <IndexButton projectId={projectId} itemId={`repo:${r.name}`} disabled={busy !== null} />
               <span className={r.cloned ? "text-cf-success" : "text-cf-muted"}>
                 {r.cloned ? "cloned" : "not cloned"}
               </span>
@@ -165,6 +168,24 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
             disabled={busy !== null}
           >
             {busy === "pull-all" && <Spinner size={12} />} Pull all
+          </button>
+          <button
+            type="button"
+            className="flex items-center gap-2 rounded-md border border-cf-border px-3 py-1.5 text-sm text-cf-ink hover:bg-cf-surface-2"
+            onClick={async () => {
+              setIndexBusy(true);
+              setError(null);
+              try {
+                await api.refreshIndex(projectId);
+              } catch (e) {
+                setError(String(e));
+              } finally {
+                setIndexBusy(false);
+              }
+            }}
+            disabled={busy !== null || indexBusy}
+          >
+            {indexBusy && <Spinner size={12} />} Refresh index
           </button>
         </div>
       )}

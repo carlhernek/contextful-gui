@@ -42,7 +42,7 @@ Step "Sidecar smoke" {
 
 Step "Rust workspace tests" {
     Push-Location "$App\src-tauri"
-    cargo test workspace:: --quiet 2>&1 | Out-Host
+    cargo test --quiet 2>&1 | Out-Host
     $code = $LASTEXITCODE
     Pop-Location
     return ($code -eq 0)

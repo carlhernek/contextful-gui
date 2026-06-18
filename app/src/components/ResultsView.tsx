@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import { api, type RunArtifacts } from "../lib/ipc";
 import { KanbanBoard } from "./KanbanBoard";
+import { IndexButton } from "./IndexButton";
 import { Spinner } from "./Spinner";
 
 export function ResultsView({ projectId, runId }: { projectId: string; runId: string | null }) {
@@ -76,12 +77,26 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
         >
           Analysis
         </button>
+        {runId && active && (
+          <IndexButton
+            projectId={projectId}
+            itemId={`artifact:${runId}/${active}/analysis.md`}
+            title="Index analysis artefact"
+          />
+        )}
         <button
           className={`rounded-md px-3 py-1 text-sm ${tab === "tasks" ? "bg-cf-accent text-cf-accent-ink" : "text-cf-muted hover:text-cf-ink"}`}
           onClick={() => setTab("tasks")}
         >
           Tasks ({current?.tasks?.tasks.length ?? 0})
         </button>
+        {runId && active && current?.tasks && (
+          <IndexButton
+            projectId={projectId}
+            itemId={`artifact:${runId}/${active}/tasks.json`}
+            title="Index tasks artefact"
+          />
+        )}
       </div>
 
       <div className="flex-1 overflow-auto p-4">

@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from contextful_sidecar.runtime.agent import run_agent
 from contextful_sidecar.runtime.eventlog import append_eventlog
+from contextful_sidecar.runtime.indexing import refresh_index
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 
 EventCallback = Callable[[str, Any], None]
@@ -202,6 +203,16 @@ async def run_modules(
     append_eventlog(ws, "run", "SUCCESS", f"runId={run_id} completed {len(completed)} modules")
     _write_run_summary(ws, run_id, completed, project_type, version)
     on_event("run", {"runId": run_id, "status": "complete", "completedModules": completed})
+    try:
+        await refresh_index(
+            workspace=ws,
+            client=client,
+            models=models,
+            on_event=on_event,
+            should_cancel=should_cancel,
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return {"runId": run_id, "status": "complete", "completedModules": completed}
 
 

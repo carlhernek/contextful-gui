@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from contextful_sidecar.runtime.chat import handle_chat
+from contextful_sidecar.runtime.indexing import enrich_index_item, refresh_index
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.preview import preview_file
 from contextful_sidecar.runtime.runs import load_run_state, run_modules
@@ -113,6 +114,30 @@ class SidecarServer:
             if method == "preview":
                 return {"id": req_id, "result": preview_file(
                     Path(workspace), params.get("path", ""), params.get("base", "repos"))}
+            if method == "refresh_index":
+                result = await refresh_index(
+                    workspace=Path(workspace),
+                    client=self.client,
+                    models=self.models,
+                    skip_enrichment=params.get("skipEnrichment", False),
+                    on_event=lambda ev, data: self._emit_event(req_id, ev, data),
+                    should_cancel=self.should_cancel,
+                )
+                if self.should_cancel():
+                    return {"id": req_id, "error": "cancelled"}
+                return {"id": req_id, "result": result}
+            if method == "enrich_index_item":
+                result = await enrich_index_item(
+                    workspace=Path(workspace),
+                    item_id=params["itemId"],
+                    client=self.client,
+                    models=self.models,
+                    on_event=lambda ev, data: self._emit_event(req_id, ev, data),
+                    should_cancel=self.should_cancel,
+                )
+                if self.should_cancel():
+                    return {"id": req_id, "error": "cancelled"}
+                return {"id": req_id, "result": result}
             return {"id": req_id, "error": f"unknown method: {method}"}
         except asyncio.CancelledError:
             return {"id": req_id, "error": "cancelled"}

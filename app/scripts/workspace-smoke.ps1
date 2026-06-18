@@ -18,10 +18,53 @@ function Step {
 
 Step "Rust workspace unit tests" {
     Push-Location "$App\src-tauri"
-    cargo test workspace:: --quiet 2>&1 | Out-Host
+    cargo test --quiet 2>&1 | Out-Host
     $code = $LASTEXITCODE
     Pop-Location
     return ($code -eq 0)
+}
+
+Step "Sidecar indexing pytest" {
+    Push-Location "$App\sidecar"
+    uv run pytest tests/test_indexing.py -q 2>&1 | Out-Host
+    $code = $LASTEXITCODE
+    Pop-Location
+    return ($code -eq 0)
+}
+
+Step "Index refresh fixture" {
+    Push-Location "$App\sidecar"
+    $code = @"
+import asyncio, json, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, 'src')
+from contextful_sidecar.runtime.indexing import INDEX_FILE, refresh_index, scan_items
+
+class FakeClient:
+    async def chat_completion(self, **kwargs):
+        return {'choices': [{'message': {'content': '{"description":"fixture repo","keywords":["fixture"]}'}}]}
+
+async def main():
+    tmp = Path(tempfile.mkdtemp())
+    ws = tmp / 'ws'
+    ws.mkdir()
+    (ws / '.contextful.json').write_text(json.dumps({
+        'display_name': 'x', 'project_type': 'both',
+        'repos': [{'name': 'backoffice', 'url': 'u', 'branch': 'main'}]
+    }), encoding='utf-8')
+    (ws / 'repos' / 'backoffice').mkdir(parents=True)
+    (ws / 'repos' / 'backoffice' / 'README.md').write_text('# Backoffice', encoding='utf-8')
+    items = scan_items(ws)
+    assert any(i['id'] == 'repo:backoffice' for i in items)
+    await refresh_index(workspace=ws, client=FakeClient(), models={'module': 'test'}, skip_enrichment=True)
+    data = json.loads((ws / INDEX_FILE).read_text(encoding='utf-8'))
+    assert any(i['id'] == 'repo:backoffice' for i in data['items'])
+    print('ok')
+
+asyncio.run(main())
+"@ | uv run python -
+    Pop-Location
+    return ($LASTEXITCODE -eq 0)
 }
 
 Step "Sidecar preview pytest" {

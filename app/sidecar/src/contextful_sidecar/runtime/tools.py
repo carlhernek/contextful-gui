@@ -221,6 +221,13 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
 ]
 
+ORCHESTRATOR_READONLY_TOOLS = frozenset({"read_file", "list_directory", "grep_repo"})
+
+ORCHESTRATOR_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    t for t in TOOL_DEFINITIONS
+    if (t.get("function") or {}).get("name") in ORCHESTRATOR_READONLY_TOOLS
+]
+
 
 # --- run-folder helpers ---------------------------------------------------
 # The agent sets these per run via set_run_context so write_analysis/write_tasks
@@ -428,3 +435,9 @@ def execute_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
         return f"ERROR: missing argument {exc}"
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: {exc}"
+
+
+def execute_readonly_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
+    if name not in ORCHESTRATOR_READONLY_TOOLS:
+        return f"ERROR: tool '{name}' is not available to the orchestrator"
+    return execute_tool(workspace, name, args)

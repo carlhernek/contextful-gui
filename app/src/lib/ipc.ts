@@ -125,6 +125,23 @@ export interface VersionStatus {
   updateAvailable: boolean;
 }
 
+export interface IndexItem {
+  id: string;
+  type: "repo" | "meta" | "artifact" | string;
+  path: string;
+  description?: string;
+  keywords?: string[];
+  source?: "user" | "ai" | "heuristic" | string;
+  meta?: Record<string, unknown>;
+}
+
+export interface WorkspaceIndex {
+  version: number;
+  updatedAt?: string | null;
+  project?: { displayName?: string; projectType?: string };
+  items: IndexItem[];
+}
+
 /** Listen for streamed sidecar events; returns an unlisten fn. */
 export async function onContextfulEvent(handler: (e: SidecarEvent) => void) {
   return listen<SidecarEvent>("contextful-event", (e) => handler(e.payload));
@@ -224,4 +241,22 @@ export const api = {
     invoke<VersionStatus>("get_modules_version_status", { id, fetch }),
   previewFile: (id: string, path: string, base?: string) =>
     invoke<PreviewResult>("preview_file", { id, path, base: base ?? "repos" }),
+
+  getIndex: (id: string) => invoke<WorkspaceIndex>("get_index", { id }),
+  readIndexItem: (id: string, itemId: string) =>
+    invoke<IndexItem>("read_index_item", { id, itemId }),
+  setIndexAnnotation: (id: string, itemId: string, description: string, keywords: string[]) =>
+    invoke<{ description: string; keywords: string[] }>("set_index_annotation", {
+      id,
+      itemId,
+      description,
+      keywords,
+    }),
+  refreshIndex: (id: string) =>
+    invoke<{ ok: boolean; itemCount: number; enriched: number }>("refresh_index", { id }),
+  enrichIndexItem: (id: string, itemId: string) =>
+    invoke<{ ok: boolean; itemCount: number; enriched: number }>("enrich_index_item", {
+      id,
+      itemId,
+    }),
 };

@@ -11,7 +11,40 @@ step() {
   if "$@"; then echo "OK: $n"; else echo "FAIL: $n"; FAILED=$((FAILED+1)); fi
 }
 
-step "Rust workspace unit tests" bash -c "cd \"$APP/src-tauri\" && cargo test workspace:: --quiet"
+step "Rust workspace unit tests" bash -c "cd \"$APP/src-tauri\" && cargo test --quiet"
+step "Sidecar indexing pytest" bash -c "cd \"$APP/sidecar\" && uv run pytest tests/test_indexing.py -q"
+
+step "Index refresh fixture" bash -c '
+  cd "'"$APP"'/sidecar"
+  uv run python - <<PY
+import asyncio, json, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, "src")
+from contextful_sidecar.runtime.indexing import INDEX_FILE, refresh_index, scan_items
+
+class FakeClient:
+    async def chat_completion(self, **kwargs):
+        return {"choices": [{"message": {"content": "{\"description\":\"fixture repo\",\"keywords\":[\"fixture\"]}"}}]}
+
+async def main():
+    tmp = Path(tempfile.mkdtemp())
+    ws = tmp / "ws"
+    ws.mkdir()
+    (ws / ".contextful.json").write_text(json.dumps({
+        "display_name": "x", "project_type": "both",
+        "repos": [{"name": "backoffice", "url": "u", "branch": "main"}]
+    }), encoding="utf-8")
+    (ws / "repos" / "backoffice").mkdir(parents=True)
+    (ws / "repos" / "backoffice" / "README.md").write_text("# Backoffice", encoding="utf-8")
+    assert any(i["id"] == "repo:backoffice" for i in scan_items(ws))
+    await refresh_index(workspace=ws, client=FakeClient(), models={"module": "test"}, skip_enrichment=True)
+    data = json.loads((ws / INDEX_FILE).read_text(encoding="utf-8"))
+    assert any(i["id"] == "repo:backoffice" for i in data["items"])
+    print("ok")
+
+asyncio.run(main())
+PY'
+
 step "Sidecar preview pytest" bash -c "cd \"$APP/sidecar\" && uv run pytest tests/test_preview.py -q"
 
 step "Legacy meta preview via Python" bash -c '

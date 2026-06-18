@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, type MetaEntry, type PreviewResult } from "../lib/ipc";
 import { FilePreview } from "./FilePreview";
 import { FileTree } from "./FileTree";
+import { IndexButton } from "./IndexButton";
 
 interface Props {
   projectId: string;
@@ -109,6 +110,11 @@ export function MetaDocumentsTab({ projectId }: Props) {
         </div>
       </div>
       <div className="overflow-hidden rounded-lg border border-cf-border bg-cf-surface">
+        {selectedPath && (
+          <div className="flex items-center justify-end border-b border-cf-border px-3 py-1">
+            <IndexButton projectId={projectId} itemId={`meta:${selectedPath}`} />
+          </div>
+        )}
         <FilePreview preview={preview} loading={loadingPreview} />
       </div>
     </div>

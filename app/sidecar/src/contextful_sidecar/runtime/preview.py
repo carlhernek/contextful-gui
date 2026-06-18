@@ -1,8 +1,10 @@
 """File preview for the UI (spec section 4: preview method)."""
 from __future__ import annotations
 
+import base64
 import csv
 import io
+import mimetypes
 from pathlib import Path
 from typing import Any
 
@@ -11,10 +13,12 @@ from contextful_sidecar.runtime.tools import _resolve
 PREVIEW_CAP = 200_000
 TABLE_ROW_CAP = 500
 TEXT_EXTENSIONS = {
-    ".txt", ".md", ".json", ".yaml", ".yml", ".py", ".js", ".ts", ".tsx",
-    ".jsx", ".html", ".css", ".xml", ".toml", ".ini", ".cfg", ".log",
-    ".rs", ".go", ".java", ".sh", ".sql",
+    ".txt", ".md", ".markdown", ".json", ".yaml", ".yml", ".py", ".js", ".ts", ".tsx",
+    ".jsx", ".html", ".htm", ".css", ".xml", ".toml", ".ini", ".cfg", ".log",
+    ".rs", ".go", ".java", ".sh", ".sql", ".rtf",
 }
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"}
+DOCX_EXTENSIONS = {".docx", ".doc"}
 
 
 def _preview_text(data: str) -> dict[str, Any]:
@@ -69,6 +73,29 @@ def _preview_xlsx(target: Path) -> dict[str, Any]:
         wb.close()
 
 
+def _preview_docx(target: Path) -> dict[str, Any]:
+    from docx import Document
+
+    doc = Document(target)
+    lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    data = "\n".join(lines) if lines else "(empty document)"
+    return _preview_text(data)
+
+
+def _preview_image(target: Path) -> dict[str, Any]:
+    raw = target.read_bytes()
+    mime, _ = mimetypes.guess_type(target.name)
+    if not mime or not mime.startswith("image/"):
+        mime = "image/png"
+    encoded = base64.b64encode(raw).decode("ascii")
+    return {
+        "ok": True,
+        "kind": "image",
+        "imageUrl": f"data:{mime};base64,{encoded}",
+        "truncated": False,
+    }
+
+
 def preview_file(workspace: Path, path: str, base: str = "repos") -> dict[str, Any]:
     """Return a preview dict for a file under <base>/ in the workspace."""
     workspace = Path(workspace)
@@ -102,6 +129,27 @@ def preview_file(workspace: Path, path: str, base: str = "repos") -> dict[str, A
             return {**base_result, **_preview_xlsx(target)}
         except Exception as exc:  # noqa: BLE001
             return {**base_result, "ok": False, "error": str(exc), "kind": "unsupported"}
+
+    if ext in DOCX_EXTENSIONS:
+        try:
+            return {**base_result, **_preview_docx(target)}
+        except Exception as exc:  # noqa: BLE001
+            return {**base_result, "ok": False, "error": str(exc), "kind": "unsupported"}
+
+    if ext in IMAGE_EXTENSIONS:
+        try:
+            return {**base_result, **_preview_image(target)}
+        except OSError as exc:
+            return {**base_result, "ok": False, "error": str(exc), "kind": "unsupported"}
+
+    if ext == ".pdf":
+        return {
+            **base_result,
+            "ok": True,
+            "kind": "text",
+            "content": f"PDF document ({base_result['size']} bytes). Open externally to view.",
+            "truncated": False,
+        }
 
     if ext not in TEXT_EXTENSIONS and ext != "":
         return {

@@ -59,6 +59,14 @@ export function FilePreview({ preview, loading }: Props) {
               </tbody>
             </table>
           </div>
+        ) : preview.kind === "image" && preview.imageUrl ? (
+          <div className="flex justify-center p-4">
+            <img
+              src={preview.imageUrl}
+              alt={preview.name ?? preview.path}
+              className="max-h-[60vh] max-w-full rounded object-contain"
+            />
+          </div>
         ) : (
           <pre className="whitespace-pre-wrap font-mono text-xs text-cf-ink">{preview.content}</pre>
         )}

@@ -59,6 +59,34 @@ def test_preview_unsupported_binary(workspace: Path) -> None:
     assert result["kind"] == "unsupported"
 
 
+def test_preview_docx_text(workspace: Path) -> None:
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("Hello requirements")
+    target = workspace / "meta" / "spec.docx"
+    doc.save(target)
+
+    result = preview_file(workspace, "spec.docx", base="meta")
+    assert result["ok"] is True
+    assert "Hello requirements" in result.get("content", "")
+
+
+def test_preview_png_image(workspace: Path) -> None:
+    # minimal 1x1 PNG
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+        b"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01"
+        b"\x0d\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    (workspace / "meta" / "icon.png").write_bytes(png)
+    result = preview_file(workspace, "icon.png", base="meta")
+    assert result["ok"] is True
+    assert result["kind"] == "image"
+    assert result.get("imageUrl", "").startswith("data:image/")
+
+
 def test_preview_meta_base(workspace: Path) -> None:
     result = preview_file(workspace, "notes.md", base="meta")
     assert result["ok"] is True

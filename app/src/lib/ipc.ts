@@ -71,9 +71,10 @@ export interface PreviewResult {
   ext?: string;
   size?: number;
   truncated?: boolean;
-  kind?: "text" | "table" | "unsupported";
+  kind?: "text" | "table" | "image" | "unsupported";
   content?: string;
   table?: PreviewTable;
+  imageUrl?: string;
 }
 
 export interface ModuleInfo {
@@ -193,8 +194,13 @@ export const api = {
   pullRepos: (id: string) => invoke<{ results: unknown[] }>("pull_repos", { id }),
   listRepos: (id: string) => invoke<RepoStatus[]>("list_repos", { id }),
 
-  uploadMetaFiles: (id: string, sources: string[]) =>
-    invoke<string[]>("upload_meta_files", { id, sources }),
+  uploadMetaFiles: (id: string, sources: string[], destPath?: string) =>
+    invoke<string[]>("upload_meta_files", { id, sources, destPath: destPath ?? null }),
+  createMetaDir: (id: string, path: string) => invoke<void>("create_meta_dir", { id, path }),
+  renameMetaEntry: (id: string, path: string, newName: string) =>
+    invoke<string>("rename_meta_entry", { id, path, newName }),
+  moveMetaEntry: (id: string, path: string, destPath: string) =>
+    invoke<string>("move_meta_entry", { id, path, destPath }),
   listMetaDir: (id: string, relPath?: string) =>
     invoke<MetaEntry[]>("list_meta_dir", { id, relPath: relPath ?? null }),
   listMetaFiles: (id: string) => invoke<{ name: string; size: number }[]>("list_meta_files", { id }),

@@ -267,13 +267,16 @@ async fn upload_meta_files(
     _state: State<'_, AppState>,
     id: String,
     sources: Vec<String>,
+    dest_path: Option<String>,
 ) -> CmdResult<Vec<String>> {
     let install = install_path(&app)?;
     let project = workspace::project_dir(&install, &id);
-    let uploaded = workspace::upload_meta_files(&install, &id, &sources).map_err(|e| {
-        log_project_error(&project, "meta", &format!("upload failed — {e}"));
-        err(e)
-    })?;
+    let dest = dest_path.unwrap_or_default();
+    let uploaded =
+        workspace::upload_meta_files(&install, &id, &sources, &dest).map_err(|e| {
+            log_project_error(&project, "meta", &format!("upload failed — {e}"));
+            err(e)
+        })?;
     workspace::append_eventlog(
         &project,
         "meta",
@@ -281,6 +284,58 @@ async fn upload_meta_files(
         &format!("uploaded {} file(s): {}", uploaded.len(), uploaded.join(", ")),
     );
     Ok(uploaded)
+}
+
+#[tauri::command]
+fn create_meta_dir(app: AppHandle, id: String, path: String) -> CmdResult<()> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    workspace::create_meta_dir(&install, &id, &path).map_err(|e| {
+        log_project_error(&project, "meta", &format!("create folder {path} failed — {e}"));
+        err(e)
+    })?;
+    workspace::append_eventlog(&project, "meta", "SUCCESS", &format!("created folder {path}"));
+    Ok(())
+}
+
+#[tauri::command]
+fn rename_meta_entry(app: AppHandle, id: String, path: String, new_name: String) -> CmdResult<String> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    let new_path = workspace::rename_meta_entry(&install, &id, &path, &new_name).map_err(|e| {
+        log_project_error(&project, "meta", &format!("rename {path} failed — {e}"));
+        err(e)
+    })?;
+    workspace::append_eventlog(
+        &project,
+        "meta",
+        "SUCCESS",
+        &format!("renamed {path} -> {new_path}"),
+    );
+    Ok(new_path)
+}
+
+#[tauri::command]
+fn move_meta_entry(
+    app: AppHandle,
+    id: String,
+    path: String,
+    dest_path: String,
+) -> CmdResult<String> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    let new_path =
+        workspace::move_meta_entry(&install, &id, &path, &dest_path).map_err(|e| {
+            log_project_error(&project, "meta", &format!("move {path} failed — {e}"));
+            err(e)
+        })?;
+    workspace::append_eventlog(
+        &project,
+        "meta",
+        "SUCCESS",
+        &format!("moved {path} -> {new_path}"),
+    );
+    Ok(new_path)
 }
 
 #[tauri::command]
@@ -691,6 +746,9 @@ pub fn run() {
             list_repos,
             pull_repos,
             upload_meta_files,
+            create_meta_dir,
+            rename_meta_entry,
+            move_meta_entry,
             list_meta_dir,
             list_meta_files,
             delete_meta_entry,

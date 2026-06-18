@@ -581,24 +581,53 @@ pub struct MetaEntry {
     pub size: Option<u64>,
 }
 
-fn resolve_meta_path(project: &Path, rel_path: &str) -> Result<PathBuf> {
+fn meta_rel_to_path(project: &Path, rel_path: &str) -> Result<PathBuf> {
     let meta_root = project.join("meta");
     fs::create_dir_all(&meta_root).ok();
     let rel = rel_path.trim().trim_matches('/').replace('\\', "/");
     if rel.contains("..") {
         bail!("path traversal not allowed");
     }
-    let target = if rel.is_empty() {
-        meta_root.clone()
+    Ok(if rel.is_empty() {
+        meta_root
     } else {
-        meta_root.join(&rel)
-    };
-    let meta_canonical = meta_root.canonicalize().unwrap_or(meta_root);
-    let canonical = target.canonicalize().with_context(|| format!("resolve meta/{rel}"))?;
-    if !canonical.starts_with(&meta_canonical) {
+        meta_root.join(rel)
+    })
+}
+
+fn resolve_meta_path(project: &Path, rel_path: &str) -> Result<PathBuf> {
+    let target = meta_rel_to_path(project, rel_path)?;
+    if !target.exists() {
+        bail!("not found: meta/{rel_path}");
+    }
+    let meta_root = meta_rel_to_path(project, "")?;
+    let root_canon = meta_root.canonicalize().unwrap_or(meta_root);
+    let canonical = target
+        .canonicalize()
+        .with_context(|| format!("resolve meta/{rel_path}"))?;
+    if !canonical.starts_with(&root_canon) {
         bail!("path escapes meta directory");
     }
     Ok(canonical)
+}
+
+const META_UPLOAD_EXTENSIONS: &[&str] = &[
+    "txt", "md", "markdown", "docx", "doc", "pdf", "rtf",
+    "csv", "xlsx", "xls", "xlsm",
+    "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico",
+    "json", "yaml", "yml", "xml", "toml", "ini", "cfg", "log",
+    "html", "htm", "css", "py", "js", "ts", "tsx", "jsx", "rs", "go", "java", "sh", "sql",
+];
+
+fn meta_upload_allowed(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_lowercase();
+            META_UPLOAD_EXTENSIONS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
 }
 
 pub fn list_meta_dir(install: &Path, id: &str, rel_path: &str) -> Result<Vec<MetaEntry>> {
@@ -646,42 +675,95 @@ pub fn list_meta_dir(install: &Path, id: &str, rel_path: &str) -> Result<Vec<Met
     Ok(out)
 }
 
-pub fn upload_meta_files(install: &Path, id: &str, sources: &[String]) -> Result<Vec<String>> {
+pub fn upload_meta_files(
+    install: &Path,
+    id: &str,
+    sources: &[String],
+    dest_rel_path: &str,
+) -> Result<Vec<String>> {
     let project = project_dir(install, id);
-    let meta_dir = project.join("meta");
-    fs::create_dir_all(&meta_dir).ok();
+    let dest_dir = meta_rel_to_path(&project, dest_rel_path)?;
+    if !dest_dir.is_dir() {
+        bail!("upload destination is not a directory");
+    }
     let mut copied = Vec::new();
     for src in sources {
         let src_path = Path::new(src);
-        let Some(name) = src_path.file_name() else {
+        if src_path.is_dir() {
+            bail!("folder upload is not supported — upload files or create folders in the app");
+        }
+        let Some(name) = src_path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let dest = meta_dir.join(name);
-        if src_path.is_dir() {
-            copy_dir_recursive(src_path, &dest)?;
-            copied.push(name.to_string_lossy().to_string());
-        } else {
-            fs::copy(src_path, &dest).with_context(|| format!("copy {src}"))?;
-            copied.push(name.to_string_lossy().to_string());
+        if !meta_upload_allowed(name) {
+            bail!("unsupported file type: {name}");
         }
+        let dest = dest_dir.join(name);
+        fs::copy(src_path, &dest).with_context(|| format!("copy {src}"))?;
+        copied.push(if dest_rel_path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{dest_rel_path}/{name}")
+        });
     }
     Ok(copied)
 }
 
-fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
-    fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let from = entry.path();
-        let to = dest.join(&name);
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            fs::copy(&from, &to).with_context(|| format!("copy {}", from.display()))?;
-        }
+pub fn create_meta_dir(install: &Path, id: &str, rel_path: &str) -> Result<()> {
+    let project = project_dir(install, id);
+    let target = meta_rel_to_path(&project, rel_path)?;
+    if target.exists() {
+        bail!("already exists: {rel_path}");
     }
+    fs::create_dir(&target).with_context(|| format!("create meta/{rel_path}"))?;
     Ok(())
+}
+
+pub fn rename_meta_entry(install: &Path, id: &str, rel_path: &str, new_name: &str) -> Result<String> {
+    let new_name = new_name.trim().trim_matches('/').replace('\\', "/");
+    if new_name.is_empty() || new_name.contains('/') || new_name.contains("..") {
+        bail!("invalid name");
+    }
+    let project = project_dir(install, id);
+    let from = resolve_meta_path(&project, rel_path)?;
+    let parent = from
+        .parent()
+        .context("meta entry has no parent")?;
+    let to = parent.join(&new_name);
+    if to.exists() {
+        bail!("'{new_name}' already exists");
+    }
+    fs::rename(&from, &to).with_context(|| format!("rename {rel_path}"))?;
+    let rel = rel_path.trim().trim_matches('/').replace('\\', "/");
+    let new_rel = if rel.contains('/') {
+        format!("{}/{}", rel.rsplit_once('/').map(|(p, _)| p).unwrap_or(""), new_name)
+    } else {
+        new_name.clone()
+    };
+    Ok(new_rel)
+}
+
+pub fn move_meta_entry(install: &Path, id: &str, from_rel: &str, dest_dir_rel: &str) -> Result<String> {
+    let project = project_dir(install, id);
+    let from = resolve_meta_path(&project, from_rel)?;
+    let dest_dir = meta_rel_to_path(&project, dest_dir_rel)?;
+    if !dest_dir.is_dir() {
+        bail!("destination is not a directory");
+    }
+    let name = from
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("entry has no name")?;
+    let to = dest_dir.join(name);
+    if to.exists() {
+        bail!("'{name}' already exists in destination");
+    }
+    fs::rename(&from, &to).with_context(|| format!("move {from_rel}"))?;
+    Ok(if dest_dir_rel.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dest_dir_rel}/{name}")
+    })
 }
 
 pub fn list_meta_files(install: &Path, id: &str) -> Vec<Value> {
@@ -704,10 +786,7 @@ pub fn delete_meta_entry(install: &Path, id: &str, rel_path: &str) -> Result<()>
     if path.is_file() {
         fs::remove_file(&path).context("delete meta file")?;
     } else if path.is_dir() {
-        if fs::read_dir(&path)?.next().is_some() {
-            bail!("directory is not empty");
-        }
-        fs::remove_dir(&path).context("delete meta dir")?;
+        fs::remove_dir_all(&path).context("delete meta dir")?;
     }
     Ok(())
 }
@@ -1123,18 +1202,62 @@ mod tests {
     }
 
     #[test]
-    fn delete_meta_entry_file_and_empty_dir() {
+    fn delete_meta_entry_file_and_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let install = tmp.path();
         let project = install.join("projects/p1");
         fs::create_dir_all(project.join("meta/empty")).unwrap();
         write_minimal_meta(&project, "P1");
         fs::write(project.join("meta/a.txt"), "x").unwrap();
+        fs::write(project.join("meta/empty/nested.txt"), "y").unwrap();
 
         delete_meta_entry(install, "p1", "a.txt").unwrap();
         assert!(!project.join("meta/a.txt").exists());
 
         delete_meta_entry(install, "p1", "empty").unwrap();
         assert!(!project.join("meta/empty").exists());
+    }
+
+    #[test]
+    fn upload_meta_files_to_subfolder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        write_minimal_meta(&project, "P1");
+        fs::create_dir_all(project.join("meta/specs")).unwrap();
+        let src = tmp.path().join("req.md");
+        fs::write(&src, "# req").unwrap();
+        let uploaded = upload_meta_files(install, "p1", &[src.to_string_lossy().to_string()], "specs").unwrap();
+        assert_eq!(uploaded, vec!["specs/req.md"]);
+        assert!(project.join("meta/specs/req.md").exists());
+    }
+
+    #[test]
+    fn create_and_rename_meta_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        write_minimal_meta(&project, "P1");
+        create_meta_dir(install, "p1", "specs").unwrap();
+        assert!(project.join("meta/specs").is_dir());
+        let renamed = rename_meta_entry(install, "p1", "specs", "requirements").unwrap();
+        assert_eq!(renamed, "requirements");
+        assert!(project.join("meta/requirements").is_dir());
+    }
+
+    #[test]
+    fn upload_rejects_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        write_minimal_meta(&project, "P1");
+        fs::create_dir_all(tmp.path().join("folder")).unwrap();
+        let err = upload_meta_files(
+            install,
+            "p1",
+            &[tmp.path().join("folder").to_string_lossy().to_string()],
+            "",
+        );
+        assert!(err.is_err());
     }
 }

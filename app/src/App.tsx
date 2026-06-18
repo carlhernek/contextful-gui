@@ -10,7 +10,6 @@ import { RunHistory } from "./components/RunHistory";
 import { ResultsView } from "./components/ResultsView";
 import { EventLogPanel } from "./components/EventLogPanel";
 import { SettingsModal } from "./components/SettingsModal";
-import { ModulesVersionBadge } from "./components/ModulesVersionBadge";
 import { ActivityIndicator } from "./components/ActivityIndicator";
 import { Spinner } from "./components/Spinner";
 import { JobsProvider } from "./lib/jobs";
@@ -33,12 +32,27 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
   const [tab, setTab] = useState<Tab>("pipeline");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [historyKey, setHistoryKey] = useState(0);
+  const [modulesRefreshKey, setModulesRefreshKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
 
   const refreshProjects = async () => setProjects(await api.listProjects());
 
   useEffect(() => {
-    void refreshProjects();
+    void (async () => {
+      const list = await api.listProjects();
+      setProjects(list);
+      if (!activeId) {
+        const pid = status.activeProject ?? list[0]?.id ?? null;
+        if (pid) {
+          setActiveId(pid);
+          await api.setActiveProject(pid);
+          await api.getModulesVersionStatus(pid, true);
+        }
+      } else {
+        await api.getModulesVersionStatus(activeId, true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const selectProject = async (id: string) => {
@@ -66,12 +80,9 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
 
       <main className="flex flex-1 flex-col overflow-hidden">
         <header className="flex items-center justify-between border-b border-cf-border px-5 py-3">
-          <div>
-            <h1 className="text-lg font-semibold text-cf-ink">
-              {active?.display_name ?? "Contextful"}
-            </h1>
-            {active && <ModulesVersionBadge projectId={active.id} />}
-          </div>
+          <h1 className="text-lg font-semibold text-cf-ink">
+            {active?.display_name ?? "Contextful"}
+          </h1>
           <div className="flex items-center gap-3">
             <ActivityIndicator />
             {(["chat", "pipeline", "meta", "repos", "results", "logs"] as Tab[]).map((t) => (
@@ -97,14 +108,6 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
                 Settings
               </button>
             )}
-            <button
-              type="button"
-              className="text-xs text-cf-muted hover:text-cf-ink"
-              onClick={onReset}
-              title="Re-run setup"
-            >
-              setup
-            </button>
           </div>
         </header>
 
@@ -120,6 +123,7 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
               projectId={active.id}
               selected={selected}
               onChangeSelected={setSelected}
+              modulesRefreshKey={modulesRefreshKey}
               onComplete={(runId) => {
                 setActiveRunId(runId);
                 setHistoryKey((k) => k + 1);
@@ -156,6 +160,8 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
           projectType={active.project_type}
           onClose={() => setShowSettings(false)}
           onSaved={refreshProjects}
+          onModulesUpdated={() => setModulesRefreshKey((k) => k + 1)}
+          onRerunSetup={onReset}
         />
       )}
     </div>

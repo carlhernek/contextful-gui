@@ -850,7 +850,17 @@ pub fn list_modules(install: &Path, id: &str) -> Vec<Value> {
             }
         }
     }
-    out.sort_by(|a, b| a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or("")));
+    out.sort_by(|a, b| {
+        let a_id = a["id"].as_str().unwrap_or("");
+        let b_id = b["id"].as_str().unwrap_or("");
+        if a_id == "workspace-index" {
+            return std::cmp::Ordering::Less;
+        }
+        if b_id == "workspace-index" {
+            return std::cmp::Ordering::Greater;
+        }
+        a_id.cmp(b_id)
+    });
     out
 }
 
@@ -876,6 +886,9 @@ fn readable(id: &str) -> String {
 }
 
 fn packs_for(module_id: &str) -> Vec<&'static str> {
+    if module_id == "workspace-index" {
+        return vec!["Core"];
+    }
     let mut packs = Vec::new();
     let engineering = [
         "security-analysis",
@@ -1026,6 +1039,17 @@ pub fn get_modules_version_status(install: &Path, id: &str, fetch: bool) -> Resu
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| local.clone());
     let update_available = parse_semver(&remote) > parse_semver(&local);
+    if fetch {
+        let (log_status, detail) = if update_available {
+            (
+                "WARN",
+                format!("v{local} installed — v{remote} available (update recommended)"),
+            )
+        } else {
+            ("SUCCESS", format!("v{local} up to date (remote v{remote})"))
+        };
+        append_eventlog(&project, "modules", log_status, &detail);
+    }
     Ok(json!({"local": local, "remote": remote, "updateAvailable": update_available}))
 }
 

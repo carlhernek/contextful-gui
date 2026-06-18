@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type ModuleInfo } from "../lib/ipc";
 import { ModelCombobox } from "./ModelCombobox";
+import { ModulesVersionBadge } from "./ModulesVersionBadge";
 import { Spinner } from "./Spinner";
 
 interface Props {
@@ -8,9 +9,18 @@ interface Props {
   projectType: string;
   onClose: () => void;
   onSaved: () => void;
+  onModulesUpdated?: () => void;
+  onRerunSetup?: () => void;
 }
 
-export function SettingsModal({ projectId, projectType, onClose, onSaved }: Props) {
+export function SettingsModal({
+  projectId,
+  projectType,
+  onClose,
+  onSaved,
+  onModulesUpdated,
+  onRerunSetup,
+}: Props) {
   const [modelIds, setModelIds] = useState<string[]>([]);
   const [models, setModels] = useState<Record<string, string>>({
     orchestrator: "deepseek/deepseek-v4-flash",
@@ -111,6 +121,35 @@ export function SettingsModal({ projectId, projectType, onClose, onSaved }: Prop
             </div>
           </details>
         </div>
+
+        <hr className="my-5 border-cf-border" />
+
+        <h3 className="mb-2 text-sm font-semibold text-cf-ink">Module pack</h3>
+        <p className="mb-2 text-xs text-cf-muted">
+          Pipeline modules are versioned separately from the app. Update to get new modules
+          (e.g. Workspace Index).
+        </p>
+        <ModulesVersionBadge projectId={projectId} onModulesUpdated={onModulesUpdated} />
+
+        {onRerunSetup && (
+          <>
+            <hr className="my-5 border-cf-border" />
+            <h3 className="mb-2 text-sm font-semibold text-cf-ink">Application</h3>
+            <button
+              type="button"
+              className="rounded-md border border-cf-border px-3 py-1.5 text-sm text-cf-ink hover:bg-cf-surface-2"
+              onClick={() => {
+                onClose();
+                onRerunSetup();
+              }}
+            >
+              Re-run setup wizard
+            </button>
+            <p className="mt-1 text-xs text-cf-muted">
+              Change install path, API key, or re-clone module templates.
+            </p>
+          </>
+        )}
 
         {error && <p className="mt-3 text-sm text-cf-danger">{error}</p>}
 

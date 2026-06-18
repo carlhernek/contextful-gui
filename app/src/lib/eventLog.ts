@@ -25,7 +25,7 @@ export function parseEventLog(text: string): EventLogEntry[] {
 export type LogFilter = "ALL" | "Ops" | "TURN" | "ERROR" | "TOOL";
 
 const OPS_STATUSES = new Set(["START", "SUCCESS", "CANCELLED", "RETRY", "RESUME", "SKIP", "WARN"]);
-const OPS_SCOPES = new Set(["job", "git", "index", "gui", "run"]);
+const OPS_SCOPES = new Set(["job", "git", "index", "gui", "run", "modules"]);
 
 export function filterEntries(entries: EventLogEntry[], filter: LogFilter): EventLogEntry[] {
   if (filter === "ALL") return entries;

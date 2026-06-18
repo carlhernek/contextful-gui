@@ -6,12 +6,24 @@ interface Props {
   selected: string[];
   onChangeSelected: (modules: string[]) => void;
   onComplete: (runId: string) => void;
+  modulesRefreshKey?: number;
 }
 
-export function PipelineTab({ projectId, selected, onChangeSelected, onComplete }: Props) {
+export function PipelineTab({
+  projectId,
+  selected,
+  onChangeSelected,
+  onComplete,
+  modulesRefreshKey,
+}: Props) {
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-4">
-      <ModuleSelector projectId={projectId} selected={selected} onChange={onChangeSelected} />
+      <ModuleSelector
+        projectId={projectId}
+        selected={selected}
+        onChange={onChangeSelected}
+        refreshKey={modulesRefreshKey}
+      />
       <RunPanel projectId={projectId} selected={selected} onComplete={onComplete} />
     </div>
   );

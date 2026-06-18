@@ -42,6 +42,38 @@ export interface RepoStatus {
   url: string;
   branch: string;
   cloned: boolean;
+  head?: string | null;
+}
+
+export interface MetaEntry {
+  name: string;
+  path: string;
+  kind: "file" | "dir";
+  size?: number;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant" | string;
+  content: string;
+  ts: string;
+}
+
+export interface PreviewTable {
+  headers: string[];
+  rows: string[][];
+}
+
+export interface PreviewResult {
+  ok: boolean;
+  error?: string;
+  path: string;
+  name?: string;
+  ext?: string;
+  size?: number;
+  truncated?: boolean;
+  kind?: "text" | "table" | "unsupported";
+  content?: string;
+  table?: PreviewTable;
 }
 
 export interface ModuleInfo {
@@ -93,17 +125,6 @@ export interface VersionStatus {
   updateAvailable: boolean;
 }
 
-export interface PreviewResult {
-  ok: boolean;
-  error?: string;
-  path: string;
-  name?: string;
-  ext?: string;
-  size?: number;
-  truncated?: boolean;
-  content?: string;
-}
-
 /** Listen for streamed sidecar events; returns an unlisten fn. */
 export async function onContextfulEvent(handler: (e: SidecarEvent) => void) {
   return listen<SidecarEvent>("contextful-event", (e) => handler(e.payload));
@@ -144,13 +165,20 @@ export const api = {
     invoke<void>("add_repo", { id, name, url, branch }),
   removeRepo: (id: string, name: string) => invoke<void>("remove_repo", { id, name }),
   cloneRepos: (id: string) => invoke<{ results: unknown[] }>("clone_repos", { id }),
+  pullRepos: (id: string) => invoke<{ results: unknown[] }>("pull_repos", { id }),
   listRepos: (id: string) => invoke<RepoStatus[]>("list_repos", { id }),
 
   uploadMetaFiles: (id: string, sources: string[]) =>
     invoke<string[]>("upload_meta_files", { id, sources }),
+  listMetaDir: (id: string, relPath?: string) =>
+    invoke<MetaEntry[]>("list_meta_dir", { id, relPath: relPath ?? null }),
   listMetaFiles: (id: string) => invoke<{ name: string; size: number }[]>("list_meta_files", { id }),
+  deleteMetaEntry: (id: string, path: string) =>
+    invoke<void>("delete_meta_entry", { id, path }),
   deleteMetaFile: (id: string, name: string) =>
     invoke<void>("delete_meta_file", { id, name }),
+
+  getChatlog: (id: string) => invoke<ChatMessage[]>("get_chatlog", { id }),
 
   listModules: (id: string) => invoke<ModuleInfo[]>("list_modules", { id }),
   getModuleSuggestions: (id: string) => invoke<string[]>("get_module_suggestions", { id }),

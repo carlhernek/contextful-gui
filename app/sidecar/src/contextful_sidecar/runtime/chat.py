@@ -102,7 +102,7 @@ async def handle_chat(
     def on_token(tok: str) -> None:
         on_event("token", tok)
 
-    model = models.get("orchestrator") or models.get("module")
+    model = models.get("orchestrator") or models.get("module") or models["module"]
     response = await client.chat_completion(model=model, messages=messages, on_token=on_token)
     reply = response["choices"][0]["message"].get("content", "")
     return {"type": "chat", "reply": reply}

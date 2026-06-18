@@ -111,7 +111,11 @@ def _list_meta_docs(workspace: Path) -> list[Path]:
     meta = Path(workspace) / "meta"
     if not meta.exists():
         return []
-    return sorted(p for p in meta.iterdir() if p.is_file())
+    out: list[Path] = []
+    for p in sorted(meta.rglob("*")):
+        if p.is_file():
+            out.append(p)
+    return out
 
 
 # --- orchestration --------------------------------------------------------

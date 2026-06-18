@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api, type Project, type SetupStatus } from "./lib/ipc";
 import { SetupWizard } from "./components/SetupWizard";
 import { ProjectSidebar } from "./components/ProjectSidebar";
-import { RepoManager } from "./components/RepoManager";
-import { ModuleSelector } from "./components/ModuleSelector";
-import { RunPanel } from "./components/RunPanel";
+import { PipelineTab } from "./components/PipelineTab";
+import { ChatPanel } from "./components/ChatPanel";
+import { MetaDocumentsTab } from "./components/MetaDocumentsTab";
+import { RepositoriesTab } from "./components/RepositoriesTab";
 import { RunHistory } from "./components/RunHistory";
 import { ResultsView } from "./components/ResultsView";
 import { EventLogPanel } from "./components/EventLogPanel";
@@ -13,112 +13,22 @@ import { SettingsModal } from "./components/SettingsModal";
 import { ModulesVersionBadge } from "./components/ModulesVersionBadge";
 import { Spinner } from "./components/Spinner";
 
-type Tab = "configure" | "results" | "logs";
+type Tab = "chat" | "pipeline" | "meta" | "repos" | "results" | "logs";
 
-function MetaFiles({ projectId }: { projectId: string }) {
-  const [files, setFiles] = useState<{ name: string; size: number }[]>([]);
-
-  const refresh = async () => setFiles(await api.listMetaFiles(projectId));
-  useEffect(() => {
-    void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
-
-  const add = async () => {
-    const picked = await open({ multiple: true });
-    if (!picked) return;
-    const paths = Array.isArray(picked) ? picked : [picked];
-    await api.uploadMetaFiles(projectId, paths);
-    await refresh();
-  };
-
-  return (
-    <div className="rounded-lg border border-cf-border bg-cf-surface p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="font-semibold text-cf-ink">Meta documents</h3>
-        <button
-          className="rounded-md border border-cf-border px-2 py-1 text-xs text-cf-ink hover:bg-cf-surface-2"
-          onClick={add}
-        >
-          Upload…
-        </button>
-      </div>
-      {files.length === 0 ? (
-        <p className="text-sm text-cf-muted">No meta documents uploaded.</p>
-      ) : (
-        <div className="space-y-1">
-          {files.map((f) => (
-            <div
-              key={f.name}
-              className="flex items-center justify-between rounded-md bg-cf-surface-2 px-3 py-1.5 text-sm"
-            >
-              <span className="text-cf-ink">{f.name}</span>
-              <button
-                className="text-cf-danger"
-                onClick={async () => {
-                  await api.deleteMetaFile(projectId, f.name);
-                  await refresh();
-                }}
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ChatBox({ projectId }: { projectId: string }) {
-  const [message, setMessage] = useState("");
-  const [reply, setReply] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const send = async () => {
-    if (!message.trim()) return;
-    setBusy(true);
-    setReply(null);
-    try {
-      const res = await api.sendChat(projectId, message.trim());
-      setReply(res.reply);
-      setMessage("");
-    } catch (e) {
-      setReply(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="rounded-lg border border-cf-border bg-cf-surface p-4">
-      <h3 className="mb-3 font-semibold text-cf-ink">Ask the orchestrator</h3>
-      <div className="flex gap-2">
-        <input
-          className="flex-1 rounded-md border border-cf-border bg-cf-surface-2 px-2 py-1.5 text-sm text-cf-ink outline-none focus:border-cf-accent"
-          placeholder="e.g. what did the security module find?"
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
-        />
-        <button
-          className="rounded-md bg-cf-accent px-3 py-1.5 text-sm font-medium text-cf-accent-ink hover:opacity-90"
-          onClick={send}
-          disabled={busy}
-        >
-          {busy ? <Spinner size={12} /> : "Send"}
-        </button>
-      </div>
-      {reply && <p className="mt-3 whitespace-pre-wrap text-sm text-cf-ink">{reply}</p>}
-    </div>
-  );
-}
+const TAB_LABELS: Record<Tab, string> = {
+  chat: "Chat",
+  pipeline: "Pipeline",
+  meta: "Meta documents",
+  repos: "Repositories",
+  results: "Results",
+  logs: "Logs",
+};
 
 function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () => void }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeId, setActiveId] = useState<string | null>(status.activeProject);
   const [selected, setSelected] = useState<string[]>([]);
-  const [tab, setTab] = useState<Tab>("configure");
+  const [tab, setTab] = useState<Tab>("pipeline");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [historyKey, setHistoryKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
@@ -138,6 +48,11 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
 
   const active = projects.find((p) => p.id === activeId) ?? null;
 
+  const handleRunIntent = (modules: string[], _force: boolean) => {
+    setSelected(modules);
+    setTab("pipeline");
+  };
+
   return (
     <div className="flex h-screen">
       <ProjectSidebar
@@ -156,19 +71,23 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
             {active && <ModulesVersionBadge projectId={active.id} />}
           </div>
           <div className="flex items-center gap-3">
-            {(["configure", "results", "logs"] as Tab[]).map((t) => (
+            {(["chat", "pipeline", "meta", "repos", "results", "logs"] as Tab[]).map((t) => (
               <button
                 key={t}
-                className={`text-sm capitalize ${
-                  tab === t ? "text-cf-ink" : "text-cf-muted hover:text-cf-ink"
+                type="button"
+                className={`text-sm ${
+                  tab === t
+                    ? "border-b-2 border-cf-accent font-medium text-cf-ink"
+                    : "text-cf-muted hover:text-cf-ink"
                 }`}
                 onClick={() => setTab(t)}
               >
-                {t}
+                {TAB_LABELS[t]}
               </button>
             ))}
             {active && (
               <button
+                type="button"
                 className="rounded-md border border-cf-border px-2 py-1 text-xs text-cf-ink hover:bg-cf-surface-2"
                 onClick={() => setShowSettings(true)}
               >
@@ -176,6 +95,7 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
               </button>
             )}
             <button
+              type="button"
               className="text-xs text-cf-muted hover:text-cf-ink"
               onClick={onReset}
               title="Re-run setup"
@@ -190,26 +110,23 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
             <p className="text-sm text-cf-muted">
               Create or select a project from the sidebar to begin.
             </p>
-          ) : tab === "configure" ? (
-            <div className="mx-auto flex max-w-4xl flex-col gap-4">
-              <RepoManager projectId={active.id} />
-              <MetaFiles projectId={active.id} />
-              <ModuleSelector
-                projectId={active.id}
-                selected={selected}
-                onChange={setSelected}
-              />
-              <RunPanel
-                projectId={active.id}
-                selected={selected}
-                onComplete={(runId) => {
-                  setActiveRunId(runId);
-                  setHistoryKey((k) => k + 1);
-                  setTab("results");
-                }}
-              />
-              <ChatBox projectId={active.id} />
-            </div>
+          ) : tab === "chat" ? (
+            <ChatPanel projectId={active.id} onRunIntent={handleRunIntent} />
+          ) : tab === "pipeline" ? (
+            <PipelineTab
+              projectId={active.id}
+              selected={selected}
+              onChangeSelected={setSelected}
+              onComplete={(runId) => {
+                setActiveRunId(runId);
+                setHistoryKey((k) => k + 1);
+                setTab("results");
+              }}
+            />
+          ) : tab === "meta" ? (
+            <MetaDocumentsTab projectId={active.id} />
+          ) : tab === "repos" ? (
+            <RepositoriesTab projectId={active.id} />
           ) : tab === "results" ? (
             <div className="mx-auto grid max-w-5xl grid-cols-[260px_1fr] gap-4">
               <RunHistory

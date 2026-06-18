@@ -200,11 +200,40 @@ fn list_repos(app: AppHandle, id: String) -> CmdResult<Vec<Value>> {
     workspace::list_repos(&install, &id).map_err(err)
 }
 
+#[tauri::command]
+async fn pull_repos(app: AppHandle, id: String) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || workspace::pull_repos(&install, &id))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
 // ===== meta docs ==========================================================
 #[tauri::command]
 fn upload_meta_files(app: AppHandle, id: String, sources: Vec<String>) -> CmdResult<Vec<String>> {
     let install = install_path(&app)?;
     workspace::upload_meta_files(&install, &id, &sources).map_err(err)
+}
+
+#[tauri::command]
+fn list_meta_dir(app: AppHandle, id: String, rel_path: Option<String>) -> CmdResult<Vec<workspace::MetaEntry>> {
+    let install = install_path(&app)?;
+    workspace::list_meta_dir(&install, &id, rel_path.as_deref().unwrap_or("")).map_err(err)
+}
+
+#[tauri::command]
+fn delete_meta_entry(app: AppHandle, id: String, path: String) -> CmdResult<()> {
+    let install = install_path(&app)?;
+    workspace::delete_meta_entry(&install, &id, &path).map_err(err)
+}
+
+#[tauri::command]
+fn get_chatlog(app: AppHandle, id: String) -> CmdResult<Vec<workspace::ChatMessage>> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    workspace::touch_project(&project);
+    Ok(workspace::load_chatlog(&project))
 }
 
 #[tauri::command]
@@ -341,8 +370,16 @@ async fn sidecar_health(app: AppHandle, state: State<'_, AppState>) -> CmdResult
 #[tauri::command]
 async fn send_chat(app: AppHandle, state: State<'_, AppState>, id: String, message: String) -> CmdResult<Value> {
     ensure_configured(&app, &state, Some(&id)).await?;
-    let workspace = project_workspace(&app, &id)?;
-    rpc(app, state.sidecar.clone(), "chat", json!({"workspace": workspace, "message": message})).await
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    workspace::touch_project(&project);
+    workspace::append_chatlog(&project, "user", &message).map_err(err)?;
+    let workspace = project.to_string_lossy().to_string();
+    let result = rpc(app, state.sidecar.clone(), "chat", json!({"workspace": workspace, "message": message})).await?;
+    if let Some(reply) = result.get("reply").and_then(|v| v.as_str()) {
+        workspace::append_chatlog(&project, "assistant", reply).map_err(err)?;
+    }
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -447,9 +484,13 @@ pub fn run() {
             remove_repo,
             clone_repos,
             list_repos,
+            pull_repos,
             upload_meta_files,
+            list_meta_dir,
             list_meta_files,
+            delete_meta_entry,
             delete_meta_file,
+            get_chatlog,
             list_modules,
             get_module_suggestions,
             get_event_log,

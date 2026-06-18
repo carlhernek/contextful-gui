@@ -94,6 +94,70 @@ fn git_run_anywhere(args: &[&str]) -> Result<String> {
     git_run(args, &cwd)
 }
 
+/// Git commands permitted on read-only target repos (no push/commit).
+const REPO_GIT_ALLOWED: &[&str] = &[
+    "clone", "fetch", "pull", "merge", "status", "rev-parse", "branch", "log", "config",
+];
+
+fn repo_git_run(args: &[&str], cwd: &Path) -> Result<String> {
+    let Some(cmd) = args.first() else {
+        bail!("empty git args");
+    };
+    if !REPO_GIT_ALLOWED.contains(cmd) {
+        bail!("git command '{cmd}' is not allowed on target repositories");
+    }
+    if args.iter().any(|a| *a == "push") {
+        bail!("git push is disabled on target repositories");
+    }
+    git_run(args, cwd)
+}
+
+fn harden_readonly_repo(repo_dir: &Path) -> Result<()> {
+    if !repo_dir.join(".git").exists() {
+        return Ok(());
+    }
+    let _ = repo_git_run(&["config", "push.default", "nothing"], repo_dir);
+    let _ = repo_git_run(
+        &["config", "remote.origin.pushurl", "DISABLED://contextful-no-push"],
+        repo_dir,
+    );
+    let hook_dir = repo_dir.join(".git").join("hooks");
+    fs::create_dir_all(&hook_dir).ok();
+    let hook = hook_dir.join("pre-push");
+    if !hook.exists() {
+        fs::write(
+            &hook,
+            "#!/bin/sh\necho 'Contextful: push disabled' >&2\nexit 1\n",
+        )
+        .context("write pre-push hook")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&hook)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&hook, perms)?;
+        }
+    }
+    Ok(())
+}
+
+fn maybe_harden_cloned_repos(project: &Path, meta: &ProjectMeta) {
+    for repo in &meta.repos {
+        let dest = project.join("repos").join(&repo.name);
+        if dest.join(".git").exists() {
+            let _ = harden_readonly_repo(&dest);
+        }
+    }
+}
+
+/// Non-destructive touch when opening a project (lazy migration hooks).
+pub fn touch_project(project: &Path) {
+    let _ = fs::create_dir_all(project.join("meta"));
+    if let Ok(meta) = read_meta(project) {
+        maybe_harden_cloned_repos(project, &meta);
+    }
+}
+
 // --- template clone + worktree projects -----------------------------------
 pub fn clone_template(install: &Path) -> Result<PathBuf> {
     let template = install.join("template");
@@ -207,6 +271,7 @@ pub fn list_projects(install: &Path) -> Vec<Value> {
             if meta.deleted {
                 continue;
             }
+            touch_project(&path);
             out.push(json!({
                 "id": id,
                 "display_name": meta.display_name,
@@ -285,11 +350,15 @@ pub fn clone_repos(install: &Path, id: &str) -> Result<Value> {
     for repo in &meta.repos {
         let dest = repos_dir.join(&repo.name);
         if dest.join(".git").exists() {
+            let _ = harden_readonly_repo(&dest);
             results.push(json!({"name": repo.name, "ok": true, "status": "already cloned"}));
             continue;
         }
         match clone_one(&repo.url, &repo.branch, &dest) {
-            Ok(()) => results.push(json!({"name": repo.name, "ok": true, "status": "cloned"})),
+            Ok(()) => {
+                let _ = harden_readonly_repo(&dest);
+                results.push(json!({"name": repo.name, "ok": true, "status": "cloned"}));
+            }
             Err(e) => {
                 let msg = e.to_string();
                 let kind = classify_git_error(&msg);
@@ -302,7 +371,7 @@ pub fn clone_repos(install: &Path, id: &str) -> Result<Value> {
 
 fn clone_one(url: &str, branch: &str, dest: &Path) -> Result<()> {
     let cwd = dest.parent().unwrap_or(Path::new("."));
-    git_run(
+    repo_git_run(
         &[
             "clone",
             "--depth",
@@ -316,8 +385,11 @@ fn clone_one(url: &str, branch: &str, dest: &Path) -> Result<()> {
     )
     .map(|_| ())
     .or_else(|_| {
-        // Fall back to a default-branch clone if the named branch does not exist.
-        git_run(&["clone", "--depth", "1", url, dest.to_str().unwrap()], cwd).map(|_| ())
+        repo_git_run(
+            &["clone", "--depth", "1", url, dest.to_str().unwrap()],
+            cwd,
+        )
+        .map(|_| ())
     })
 }
 
@@ -343,18 +415,165 @@ fn classify_git_error(stderr: &str) -> &'static str {
 
 pub fn list_repos(install: &Path, id: &str) -> Result<Vec<Value>> {
     let project = project_dir(install, id);
+    touch_project(&project);
     let meta = read_meta(&project)?;
+    maybe_harden_cloned_repos(&project, &meta);
     Ok(meta
         .repos
         .into_iter()
         .map(|r| {
-            let cloned = project.join("repos").join(&r.name).join(".git").exists();
-            json!({"name": r.name, "url": r.url, "branch": r.branch, "cloned": cloned})
+            let repo_path = project.join("repos").join(&r.name);
+            let cloned = repo_path.join(".git").exists();
+            let head = if cloned {
+                repo_git_run(&["rev-parse", "--short", "HEAD"], &repo_path)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            };
+            json!({"name": r.name, "url": r.url, "branch": r.branch, "cloned": cloned, "head": head})
         })
         .collect())
 }
 
+pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
+    let project = project_dir(install, id);
+    touch_project(&project);
+    let meta = read_meta(&project)?;
+    let mut results = Vec::new();
+    for repo in &meta.repos {
+        let dest = project.join("repos").join(&repo.name);
+        if !dest.join(".git").exists() {
+            results.push(json!({
+                "name": repo.name,
+                "ok": false,
+                "error": "not cloned",
+                "kind": "other",
+            }));
+            continue;
+        }
+        let _ = harden_readonly_repo(&dest);
+        let branch = if repo.branch.is_empty() {
+            default_branch()
+        } else {
+            repo.branch.clone()
+        };
+        let fetch_result = repo_git_run(&["fetch", "origin", &branch], &dest);
+        match fetch_result {
+            Ok(_) => {
+                let merge_ref = format!("origin/{branch}");
+                match repo_git_run(&["merge", "--ff-only", &merge_ref], &dest) {
+                    Ok(_) => {
+                        let head = repo_git_run(&["rev-parse", "--short", "HEAD"], &dest)
+                            .ok()
+                            .map(|s| s.trim().to_string());
+                        results.push(json!({
+                            "name": repo.name,
+                            "ok": true,
+                            "status": "updated",
+                            "head": head,
+                        }));
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        results.push(json!({
+                            "name": repo.name,
+                            "ok": false,
+                            "error": msg,
+                            "kind": classify_git_error(&msg),
+                        }));
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                results.push(json!({
+                    "name": repo.name,
+                    "ok": false,
+                    "error": msg,
+                    "kind": classify_git_error(&msg),
+                }));
+            }
+        }
+    }
+    Ok(json!({"results": results}))
+}
+
 // --- meta docs ------------------------------------------------------------
+#[derive(Debug, Clone, Serialize)]
+pub struct MetaEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+fn resolve_meta_path(project: &Path, rel_path: &str) -> Result<PathBuf> {
+    let meta_root = project.join("meta");
+    fs::create_dir_all(&meta_root).ok();
+    let rel = rel_path.trim().trim_matches('/').replace('\\', "/");
+    if rel.contains("..") {
+        bail!("path traversal not allowed");
+    }
+    let target = if rel.is_empty() {
+        meta_root.clone()
+    } else {
+        meta_root.join(&rel)
+    };
+    let meta_canonical = meta_root.canonicalize().unwrap_or(meta_root);
+    let canonical = target.canonicalize().with_context(|| format!("resolve meta/{rel}"))?;
+    if !canonical.starts_with(&meta_canonical) {
+        bail!("path escapes meta directory");
+    }
+    Ok(canonical)
+}
+
+pub fn list_meta_dir(install: &Path, id: &str, rel_path: &str) -> Result<Vec<MetaEntry>> {
+    let project = project_dir(install, id);
+    touch_project(&project);
+    let dir = resolve_meta_path(&project, rel_path)?;
+    if !dir.is_dir() {
+        bail!("not a directory");
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("read meta dir {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = if rel_path.trim().trim_matches('/').is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", rel_path.trim().trim_matches('/'), name)
+        };
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            out.push(MetaEntry {
+                name,
+                path,
+                kind: "dir".to_string(),
+                size: None,
+            });
+        } else if meta.is_file() {
+            out.push(MetaEntry {
+                name,
+                path,
+                kind: "file".to_string(),
+                size: Some(meta.len()),
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        let a_dir = a.kind == "dir";
+        let b_dir = b.kind == "dir";
+        match (a_dir, b_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    });
+    Ok(out)
+}
+
 pub fn upload_meta_files(install: &Path, id: &str, sources: &[String]) -> Result<Vec<String>> {
     let project = project_dir(install, id);
     let meta_dir = project.join("meta");
@@ -366,10 +585,31 @@ pub fn upload_meta_files(install: &Path, id: &str, sources: &[String]) -> Result
             continue;
         };
         let dest = meta_dir.join(name);
-        fs::copy(src_path, &dest).with_context(|| format!("copy {src}"))?;
-        copied.push(name.to_string_lossy().to_string());
+        if src_path.is_dir() {
+            copy_dir_recursive(src_path, &dest)?;
+            copied.push(name.to_string_lossy().to_string());
+        } else {
+            fs::copy(src_path, &dest).with_context(|| format!("copy {src}"))?;
+            copied.push(name.to_string_lossy().to_string());
+        }
     }
     Ok(copied)
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let from = entry.path();
+        let to = dest.join(&name);
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to).with_context(|| format!("copy {}", from.display()))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn list_meta_files(install: &Path, id: &str) -> Vec<Value> {
@@ -386,11 +626,62 @@ pub fn list_meta_files(install: &Path, id: &str) -> Vec<Value> {
     out
 }
 
-pub fn delete_meta_file(install: &Path, id: &str, name: &str) -> Result<()> {
-    let path = project_dir(install, id).join("meta").join(name);
-    if path.exists() {
-        fs::remove_file(path).context("delete meta file")?;
+pub fn delete_meta_entry(install: &Path, id: &str, rel_path: &str) -> Result<()> {
+    let project = project_dir(install, id);
+    let path = resolve_meta_path(&project, rel_path)?;
+    if path.is_file() {
+        fs::remove_file(&path).context("delete meta file")?;
+    } else if path.is_dir() {
+        if fs::read_dir(&path)?.next().is_some() {
+            bail!("directory is not empty");
+        }
+        fs::remove_dir(&path).context("delete meta dir")?;
     }
+    Ok(())
+}
+
+pub fn delete_meta_file(install: &Path, id: &str, name: &str) -> Result<()> {
+    delete_meta_entry(install, id, name)
+}
+
+// --- chatlog --------------------------------------------------------------
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+    pub ts: String,
+}
+
+pub fn load_chatlog(project: &Path) -> Vec<ChatMessage> {
+    let path = project.join(CHATLOG_FILE);
+    if !path.exists() {
+        return Vec::new();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    match serde_json::from_str::<Vec<ChatMessage>>(&raw) {
+        Ok(msgs) => msgs,
+        Err(_) => {
+            let backup = project.join(format!("{CHATLOG_FILE}.bak"));
+            let _ = fs::copy(&path, &backup);
+            append_eventlog(project, "gui", "ERROR", "reset malformed chatlog");
+            let _ = fs::write(&path, "[]");
+            Vec::new()
+        }
+    }
+}
+
+pub fn append_chatlog(project: &Path, role: &str, content: &str) -> Result<()> {
+    let mut msgs = load_chatlog(project);
+    msgs.push(ChatMessage {
+        role: role.to_string(),
+        content: content.to_string(),
+        ts: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    });
+    let raw = serde_json::to_string_pretty(&msgs)?;
+    fs::write(project.join(CHATLOG_FILE), raw).context("write chatlog")?;
     Ok(())
 }
 
@@ -613,4 +904,157 @@ fn append_eventlog(project: &Path, scope: &str, status: &str, message: &str) {
 #[allow(dead_code)] // surfaced to UI badges/logs; kept for completeness (spec 8.2)
 pub fn template_version_of(install: &Path, id: &str) -> String {
     read_template_version(&project_dir(install, id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_minimal_meta(project: &Path, display_name: &str) {
+        init_workspace_dirs(project).unwrap();
+        write_meta(
+            project,
+            &ProjectMeta {
+                display_name: display_name.to_string(),
+                project_type: "both".to_string(),
+                repos: vec![RepoEntry {
+                    name: "fixture".to_string(),
+                    url: String::new(),
+                    branch: "main".to_string(),
+                }],
+                models: serde_json::Map::new(),
+                deleted: false,
+            },
+        )
+        .unwrap();
+    }
+
+    fn init_git_repo(path: &Path, file: &str) {
+        git_run(&["init", "-b", "main"], path).unwrap();
+        fs::write(path.join(file), "content\n").unwrap();
+        git_run(&["add", "."], path).unwrap();
+        git_run(&["-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-m", "init"], path).unwrap();
+    }
+
+    #[test]
+    fn list_meta_dir_root_lists_flat_legacy_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/legacy");
+        fs::create_dir_all(project.join("meta")).unwrap();
+        write_minimal_meta(&project, "Legacy");
+        fs::write(project.join("meta/requirements.md"), "# req").unwrap();
+
+        let entries = list_meta_dir(install, "legacy", "").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, "file");
+        assert_eq!(entries[0].name, "requirements.md");
+    }
+
+    #[test]
+    fn list_meta_dir_nested_and_rejects_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        fs::create_dir_all(project.join("meta/sub")).unwrap();
+        write_minimal_meta(&project, "P1");
+        fs::write(project.join("meta/sub/doc.md"), "x").unwrap();
+
+        let sub = list_meta_dir(install, "p1", "sub").unwrap();
+        assert_eq!(sub.len(), 1);
+        assert_eq!(sub[0].name, "doc.md");
+
+        assert!(list_meta_dir(install, "p1", "../..").is_err());
+    }
+
+    #[test]
+    fn chatlog_roundtrip_and_malformed_reset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        assert!(load_chatlog(&project).is_empty());
+
+        append_chatlog(&project, "user", "hi").unwrap();
+        append_chatlog(&project, "assistant", "hello").unwrap();
+        let msgs = load_chatlog(&project);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+
+        fs::write(project.join(CHATLOG_FILE), "not json").unwrap();
+        let reset = load_chatlog(&project);
+        assert!(reset.is_empty());
+        assert!(project.join(format!("{CHATLOG_FILE}.bak")).exists());
+    }
+
+    #[test]
+    fn repo_git_run_blocks_push() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path(), "a.txt");
+        let err = repo_git_run(&["push", "origin", "main"], tmp.path());
+        assert!(err.is_err());
+        assert!(repo_git_run(&["status"], tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn harden_readonly_repo_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path(), "a.txt");
+        harden_readonly_repo(tmp.path()).unwrap();
+        harden_readonly_repo(tmp.path()).unwrap();
+        let hook = tmp.path().join(".git/hooks/pre-push");
+        assert!(hook.exists());
+    }
+
+    #[test]
+    fn legacy_project_fixture_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/legacy");
+        write_minimal_meta(&project, "Legacy");
+        fs::write(project.join("meta/requirements.md"), "# req").unwrap();
+        fs::write(project.join(".eventlog"), "[ts] gui START\n").unwrap();
+        fs::create_dir_all(project.join("runs/old-run/m")).unwrap();
+        fs::write(project.join("runs/old-run/m/analysis.md"), "ok").unwrap();
+        fs::create_dir_all(project.join("modules/security-analysis")).unwrap();
+        fs::write(
+            project.join("modules/security-analysis/SKILL.md"),
+            "# Security",
+        )
+        .unwrap();
+
+        touch_project(&project);
+        assert!(read_meta(&project).is_ok());
+        assert_eq!(list_meta_dir(install, "legacy", "").unwrap().len(), 1);
+        assert!(load_chatlog(&project).is_empty());
+        let runs = list_runs(install, "legacy");
+        assert!(!runs.is_empty());
+    }
+
+    #[test]
+    fn pull_repos_skips_uncloned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        write_minimal_meta(&project, "P1");
+        let result = pull_repos(install, "p1").unwrap();
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(!results[0]["ok"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn delete_meta_entry_file_and_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        fs::create_dir_all(project.join("meta/empty")).unwrap();
+        write_minimal_meta(&project, "P1");
+        fs::write(project.join("meta/a.txt"), "x").unwrap();
+
+        delete_meta_entry(install, "p1", "a.txt").unwrap();
+        assert!(!project.join("meta/a.txt").exists());
+
+        delete_meta_entry(install, "p1", "empty").unwrap();
+        assert!(!project.join("meta/empty").exists());
+    }
 }

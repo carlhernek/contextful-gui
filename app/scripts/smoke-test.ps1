@@ -40,6 +40,27 @@ Step "Sidecar smoke" {
     return ($code -eq 0)
 }
 
+Step "Rust workspace tests" {
+    Push-Location "$App\src-tauri"
+    cargo test workspace:: --quiet 2>&1 | Out-Host
+    $code = $LASTEXITCODE
+    Pop-Location
+    return ($code -eq 0)
+}
+
+Step "Sidecar pytest" {
+    Push-Location "$App\sidecar"
+    uv run pytest tests/ -q 2>&1 | Out-Host
+    $code = $LASTEXITCODE
+    Pop-Location
+    return ($code -eq 0)
+}
+
+Step "Workspace integration" {
+    & "$PSScriptRoot\workspace-smoke.ps1"
+    return ($LASTEXITCODE -eq 0)
+}
+
 Step "NDJSON round-trip" {
     Push-Location "$App\sidecar"
     $out = '{"id":"a","method":"configure","params":{"api_key":"fake"}}' | uv run python -m contextful_sidecar

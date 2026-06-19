@@ -89,7 +89,7 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
     Boolean(runId && active && (current?.hasAnalysis || current?.tasks));
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-w-0 flex-col overflow-hidden">
       <div className="flex items-center gap-1 overflow-x-auto border-b border-cf-border px-3 py-2">
         {artifacts?.modules.map((m) => (
           <button
@@ -147,7 +147,7 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
         )}
       </div>
 
-      <div className="flex-1 overflow-auto p-4">
+      <div className="min-w-0 flex-1 overflow-auto p-4">
         {tab === "analysis" ? (
           <div className="cf-markdown max-w-3xl">
             <Markdown remarkPlugins={[remarkGfm, remarkBreaks]}>{analysis}</Markdown>

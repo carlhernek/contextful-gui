@@ -89,4 +89,5 @@ class OpenRouterClient:
         message: dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-        return {"choices": [{"message": message}]}  # streaming-agnostic shape
+        finish_reason = "tool_calls" if tool_calls else "stop"
+        return {"choices": [{"message": message, "finish_reason": finish_reason}]}

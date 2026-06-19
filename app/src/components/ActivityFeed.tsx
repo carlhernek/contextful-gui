@@ -48,6 +48,7 @@ const STEP_KINDS = new Set([
   "index_done",
   "cache_hit",
   "cache_miss",
+  "force_reindex",
   "llm_request",
   "llm_response",
 ]);
@@ -91,9 +92,9 @@ function stepLabel(entry: ActivityEntry): string {
 function FeedEntry({ entry }: { entry: ActivityEntry }) {
   if (STEP_KINDS.has(entry.kind)) {
     return (
-      <div className="font-mono text-xs text-cf-muted">
+      <div className="min-w-0 font-mono text-xs text-cf-muted">
         <span className="uppercase tracking-wide text-cf-info/80">{entry.kind.replace(/_/g, " ")}</span>
-        <span className="ml-2">{stepLabel(entry)}</span>
+        <span className="ml-2 break-all">{stepLabel(entry)}</span>
       </div>
     );
   }
@@ -117,7 +118,7 @@ function FeedEntry({ entry }: { entry: ActivityEntry }) {
         <div className="rounded-md border border-cf-info/30 bg-cf-surface-2/30 px-3 py-2 text-sm">
           <span className="font-mono text-cf-info">{entry.name}</span>
           {entry.args && (
-            <pre className="mt-1 overflow-x-auto text-xs text-cf-muted">
+            <pre className="mt-1 min-w-0 max-w-full overflow-x-auto font-mono text-xs text-cf-muted">
               {JSON.stringify(entry.args, null, 2)}
             </pre>
           )}
@@ -125,11 +126,11 @@ function FeedEntry({ entry }: { entry: ActivityEntry }) {
       );
     case "tool_result":
       return (
-        <details className="rounded-md border border-cf-border/50 px-3 py-2 text-sm">
+        <details className="min-w-0 rounded-md border border-cf-border/50 px-3 py-2 text-sm">
           <summary className="cursor-pointer font-mono text-xs text-cf-muted">
             {entry.name} result
           </summary>
-          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-xs text-cf-ink">
+          <pre className="mt-2 max-h-48 min-w-0 max-w-full overflow-x-auto overflow-y-auto whitespace-pre font-mono text-xs text-cf-ink">
             {entry.result ?? ""}
           </pre>
         </details>
@@ -142,7 +143,7 @@ function FeedEntry({ entry }: { entry: ActivityEntry }) {
         </div>
       );
     case "error":
-      return <div className="text-sm text-cf-danger">{entry.text}</div>;
+      return <div className="break-all text-sm text-cf-danger">{entry.text}</div>;
     default:
       return null;
   }
@@ -269,7 +270,7 @@ export function ActivityFeed({ projectId, runId, moduleId, live = true }: Props)
   }
 
   return (
-    <div className="space-y-4 pb-4">
+    <div className="min-w-0 space-y-4 overflow-hidden pb-4">
       {truncated && (
         <button
           type="button"
@@ -298,7 +299,7 @@ export function ActivityFeed({ projectId, runId, moduleId, live = true }: Props)
           return (
             <section key={itemId} className="rounded-lg border border-cf-border p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
-                <h4 className="font-mono text-xs text-cf-ink">{title}</h4>
+                <h4 className="min-w-0 flex-1 truncate font-mono text-xs text-cf-ink">{title}</h4>
                 <span className="text-xs capitalize text-cf-muted">{status}</span>
               </div>
               <div className="space-y-2">

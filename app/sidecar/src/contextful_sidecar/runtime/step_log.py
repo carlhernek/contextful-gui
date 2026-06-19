@@ -68,10 +68,13 @@ async def logged_chat_completion(
         on_token=on_token,
     )
     duration_ms = int((time.monotonic() - t0) * 1000)
-    message = response["choices"][0]["message"]
+    choice = response["choices"][0]
+    message = choice["message"]
     tool_calls = message.get("tool_calls") or []
     content = message.get("content") or ""
-    finish = response.get("choices", [{}])[0].get("finish_reason") or "unknown"
+    finish = choice.get("finish_reason")
+    if not finish or finish == "unknown":
+        finish = "tool_calls" if tool_calls else "stop"
     log_step(
         workspace,
         scope=scope,

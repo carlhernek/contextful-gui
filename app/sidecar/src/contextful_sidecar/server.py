@@ -101,6 +101,7 @@ class SidecarServer:
                     run_id=params["runId"], modules=params["modules"],
                     project_type=params.get("projectType", "both"),
                     resume=params.get("resume", True), force=params.get("force", False),
+                    force_reindex=params.get("forceReindex", False),
                     specific_instructions=params.get("specific_instructions"),
                     app_version=params.get("appVersion", "unknown"),
                     on_event=lambda ev, data: self._emit_event(req_id, ev, data),

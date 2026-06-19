@@ -639,6 +639,7 @@ async fn start_run(
     run_id: String,
     modules: Vec<String>,
     force: bool,
+    force_reindex: bool,
     resume: bool,
     specific_instructions: Option<String>,
 ) -> CmdResult<Value> {
@@ -667,6 +668,7 @@ async fn start_run(
             "modules": modules,
             "projectType": meta.project_type,
             "force": force,
+            "forceReindex": force_reindex,
             "resume": resume,
             "specific_instructions": specific_instructions,
             "appVersion": APP_VERSION,

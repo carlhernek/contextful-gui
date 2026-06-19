@@ -12,6 +12,7 @@ from typing import Any
 import certifi
 import httpx
 
+from contextful_sidecar.runtime.file_text import is_binary_path, read_file_as_text, read_text_snippet
 from contextful_sidecar.runtime.eventlog import append_eventlog
 
 READ_FILE_CAP = 500_000          # 500KB cap for read_file
@@ -174,7 +175,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
-                    "repo": {"type": "string"},
+                    "repo": {"type": "string", "description": "Repo folder name under repos/"},
+                    "path": {"type": "string", "description": "Workspace-relative search root (e.g. meta/Notes)"},
                     "glob": {"type": "string"},
                 },
                 "required": ["pattern"],
@@ -281,10 +283,7 @@ def _read_file(workspace: Path, path: str) -> str:
         return f"ERROR: '{path}' is a directory; use list_directory"
     if not target.exists():
         return "ERROR: file not found"
-    data = target.read_text(encoding="utf-8", errors="replace")
-    if len(data) > READ_FILE_CAP:
-        data = data[:READ_FILE_CAP] + "\n...[truncated]"
-    return data
+    return read_file_as_text(target, cap=READ_FILE_CAP)
 
 
 def _list_directory(workspace: Path, path: str = ".") -> str:
@@ -331,11 +330,21 @@ def _write_tasks(workspace: Path, module_id: str, tasks_json: str) -> str:
 
 
 def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
-               glob: str | None = None) -> str:
-    repos_root = _resolve(workspace, "repos")
-    search_root = _resolve(workspace, f"repos/{repo}") if repo else repos_root
+               glob: str | None = None, path: str | None = None) -> str:
+    if glob and any(glob.lower().endswith(ext) for ext in (
+        ".docx", ".doc", ".pdf", ".zip", ".png", ".jpg", ".xlsx", ".pptx",
+    )):
+        return "ERROR: grep not useful on binary files; use read_file for document text"
+    if path:
+        search_root = _resolve(workspace, path)
+    elif repo:
+        search_root = _resolve(workspace, f"repos/{repo}")
+    else:
+        search_root = _resolve(workspace, "repos")
     if not search_root.exists():
-        return "ERROR: no repos to search (clone target repos first)"
+        return "ERROR: search path not found"
+    if search_root.is_file() and is_binary_path(search_root):
+        return "ERROR: grep not useful on binary files; use read_file"
     rg = shutil.which("rg")
     if rg:
         args = [rg, "--line-number", "--no-heading", "--color", "never",
@@ -433,6 +442,8 @@ def _web_search(workspace: Path, query: str) -> str:
 def _excerpt_file(path: Path, cap: int = GATHER_DOC_EXCERPT) -> str:
     if not path.is_file():
         return ""
+    if is_binary_path(path):
+        return read_text_snippet(path, cap=cap)
     try:
         data = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -556,7 +567,9 @@ def execute_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
         if name == "write_tasks":
             return _write_tasks(workspace, args["module_id"], args["tasks_json"])
         if name == "grep_repo":
-            return _grep_repo(workspace, args["pattern"], args.get("repo"), args.get("glob"))
+            return _grep_repo(
+                workspace, args["pattern"], args.get("repo"), args.get("glob"), args.get("path"),
+            )
         if name == "run_script":
             return _run_script(workspace, args["script"], args.get("args"))
         if name == "web_fetch":

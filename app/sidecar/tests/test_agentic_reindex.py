@@ -104,3 +104,44 @@ def test_agentic_reindex_skips_cached_items():
             assert notes["status"] == "cached"
 
     asyncio.run(run())
+
+
+def test_agentic_reindex_force_reindexes_cached_items():
+    async def run():
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _fixture_ws(tmp)
+            from contextful_sidecar.runtime.indexing import CACHE_FILE, _sha1
+
+            notes_bytes = (ws / "meta" / "notes.md").read_bytes()
+            cache = {
+                "meta:notes.md": {
+                    "contentHash": _sha1(notes_bytes),
+                    "description": "existing",
+                    "keywords": ["keep"],
+                    "source": "ai",
+                },
+            }
+            (ws / CACHE_FILE).write_text(json.dumps(cache), encoding="utf-8")
+
+            client = AsyncMock()
+            client.chat_completion.return_value = {
+                "choices": [{
+                    "message": {"content": '{"description":"reindexed","keywords":["new"]}'},
+                    "finish_reason": "stop",
+                }],
+            }
+            result = await agentic_reindex(
+                workspace=ws,
+                run_id="force-run",
+                client=client,
+                models={"module": "test/model"},
+                force_reindex=True,
+            )
+            assert result["enriched"] >= 1
+            log = (ws / ".eventlog").read_text(encoding="utf-8")
+            assert "FORCE_REINDEX" in log
+            index = json.loads((ws / INDEX_FILE).read_text(encoding="utf-8"))
+            notes = next(i for i in index["items"] if i["id"] == "meta:notes.md")
+            assert notes["description"] == "reindexed"
+
+    asyncio.run(run())

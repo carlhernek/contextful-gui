@@ -28,6 +28,12 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [instructions, setInstructions] = useState("");
   const [force, setForce] = useState(false);
+  const [forceReindex, setForceReindex] = useState(false);
+  const indexSelected = selected.includes("workspace-index");
+
+  useEffect(() => {
+    if (!indexSelected) setForceReindex(false);
+  }, [indexSelected]);
 
   const lastActivity = useRef<number>(Date.now());
 
@@ -91,6 +97,7 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
         runId: id,
         modules: selected,
         force,
+        forceReindex: indexSelected && forceReindex,
         resume: true,
         specificInstructions: instructions.trim() || undefined,
       });
@@ -106,12 +113,24 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
 
   return (
     <div className="rounded-lg border border-cf-border bg-cf-surface p-4">
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between gap-2">
         <h3 className="font-semibold text-cf-ink">Run</h3>
-        <label className="flex items-center gap-1 text-xs text-cf-muted">
-          <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
-          force re-run
-        </label>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-1 text-xs text-cf-muted">
+            <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
+            force re-run
+          </label>
+          {indexSelected && (
+            <label className="flex items-center gap-1 text-xs text-cf-muted">
+              <input
+                type="checkbox"
+                checked={forceReindex}
+                onChange={(e) => setForceReindex(e.target.checked)}
+              />
+              force re-indexing
+            </label>
+          )}
+        </div>
       </div>
 
       <textarea

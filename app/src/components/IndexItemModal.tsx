@@ -89,8 +89,16 @@ export function IndexItemModal({ open, projectId, itemId, onClose }: Props) {
             <p className="font-mono text-xs text-cf-muted">{itemId}</p>
             <p className="text-xs text-cf-muted">{displayPath}</p>
           </div>
-          <span className="rounded border border-cf-border px-2 py-0.5 text-xs text-cf-muted">
-            {source === "user" ? "edited" : source}
+          <span
+            className={`rounded border px-2 py-0.5 text-xs ${
+              source === "user"
+                ? "border-cf-info/40 text-cf-info"
+                : source === "heuristic"
+                  ? "border-cf-warning/40 text-cf-warning"
+                  : "border-cf-border text-cf-muted"
+            }`}
+          >
+            {source === "user" ? "edited" : source === "heuristic" ? "fallback" : source}
           </span>
         </div>
 

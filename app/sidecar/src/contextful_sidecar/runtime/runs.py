@@ -163,6 +163,7 @@ async def _run_modules_body(
     project_type: str,
     resume: bool,
     force: bool,
+    force_reindex: bool = False,
     specific_instructions: str | None,
     on_event: EventCallback,
     should_cancel: CancelCheck,
@@ -175,11 +176,14 @@ async def _run_modules_body(
         return {"runId": run_id, "status": "complete", "completedModules":
                 load_run_state(ws, run_id).get("completedModules", []), "alreadyComplete": True}
 
+    start_msg = f"runId={run_id} app=v{app_version} modules={version} ({len(to_run)} to run)"
+    if force_reindex:
+        start_msg += " forceReindex=true"
     append_eventlog(
         ws,
         "run",
         "START",
-        f"runId={run_id} app=v{app_version} modules={version} ({len(to_run)} to run)",
+        start_msg,
     )
     state = save_run_state(ws, run_id, status="running", error=None, failedModule=None)
     completed = list(state.get("completedModules", []))
@@ -215,6 +219,7 @@ async def _run_modules_body(
                 models=models,
                 on_event=on_event,
                 should_cancel=should_cancel,
+                force_reindex=force_reindex,
             )
         else:
             model = models.get(module_id) or models.get("module") or models["module"]
@@ -260,6 +265,7 @@ async def run_modules(
     project_type: str = "both",
     resume: bool = True,
     force: bool = False,
+    force_reindex: bool = False,
     specific_instructions: str | None = None,
     on_event: EventCallback | None = None,
     should_cancel: CancelCheck | None = None,
@@ -279,6 +285,7 @@ async def run_modules(
             project_type=project_type,
             resume=resume,
             force=force,
+            force_reindex=force_reindex,
             specific_instructions=specific_instructions,
             on_event=on_event,
             should_cancel=should_cancel,
@@ -307,6 +314,7 @@ async def _run_workspace_index(
     models: dict[str, str],
     on_event: EventCallback,
     should_cancel: CancelCheck,
+    force_reindex: bool = False,
 ) -> tuple[str, str | None]:
     if should_cancel():
         return "", "cancelled"
@@ -318,6 +326,7 @@ async def _run_workspace_index(
             models=models,
             on_event=on_event,
             should_cancel=should_cancel,
+            force_reindex=force_reindex,
         )
         if should_cancel():
             return "", "cancelled"

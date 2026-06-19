@@ -135,19 +135,19 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
           ) : tab === "repos" ? (
             <RepositoriesTab projectId={active.id} />
           ) : tab === "results" ? (
-            <div className="mx-auto grid max-w-5xl grid-cols-[260px_1fr] gap-4">
+            <div className="mx-auto grid max-w-5xl grid-cols-[260px_minmax(0,1fr)] gap-4">
               <RunHistory
                 projectId={active.id}
                 activeRunId={activeRunId}
                 refreshKey={historyKey}
                 onSelect={setActiveRunId}
               />
-              <div className="h-[70vh] rounded-lg border border-cf-border bg-cf-surface">
+              <div className="h-[70vh] min-w-0 overflow-hidden rounded-lg border border-cf-border bg-cf-surface">
                 <ResultsView projectId={active.id} runId={activeRunId} />
               </div>
             </div>
           ) : (
-            <div className="mx-auto h-[75vh] max-w-4xl">
+            <div className="mx-auto h-[75vh] min-w-0 max-w-4xl overflow-hidden">
               <EventLogPanel projectId={active.id} />
             </div>
           )}

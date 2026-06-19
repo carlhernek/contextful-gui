@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from contextful_sidecar.runtime.file_text import is_binary_path, read_text_snippet, repo_scan_snippet
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.step_log import log_step
@@ -157,7 +158,11 @@ def _stat_hash(path: Path) -> str:
 
 
 def _is_binary_path(path: Path) -> bool:
-    return path.suffix.lower() in BINARY_EXTENSIONS
+    return is_binary_path(path)
+
+
+HEURISTIC_REPO_DESC_RE = re.compile(r"^Repository .+ @ [a-f0-9]{8,}$")
+HEURISTIC_BINARY_DESC_RE = re.compile(r"^binary file \(\d+ bytes\)$")
 
 
 def _file_content_hash(path: Path, *, read_cap: int = HASH_READ_CAP) -> str:
@@ -178,17 +183,7 @@ def _file_content_hash(path: Path, *, read_cap: int = HASH_READ_CAP) -> str:
 
 
 def _file_snippet(path: Path) -> str:
-    if _is_binary_path(path):
-        try:
-            size = path.stat().st_size
-        except OSError:
-            return ""
-        return f"binary file ({size} bytes)"
-    try:
-        data = path.read_bytes()[:CONTENT_HEAD_CAP]
-        return data.decode("utf-8", errors="replace")
-    except OSError:
-        return ""
+    return read_text_snippet(path, cap=CONTENT_HEAD_CAP)
 
 
 def _artifact_file_fields(fp: Path) -> tuple[str, str] | None:
@@ -283,7 +278,7 @@ def _scan_repo_item(workspace: Path, repo: dict[str, Any]) -> dict[str, Any]:
             content_hash = _sha1(f"{head or ''}:cloned:{mtime_ns}")
         except OSError:
             content_hash = _sha1(f"{head or ''}:cloned")
-        snippet = f"Repository {name}" + (f" @ {head}" if head else "")
+        snippet = repo_scan_snippet(repo_dir, name)
     else:
         content_hash = _sha1(f"uncloned:{name}")
         snippet = f"Repository {name} (not cloned)"
@@ -601,18 +596,47 @@ def _parse_enrichment(text: str) -> dict[str, Any]:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    desc = str(data.get("description") or "").strip()[:200]
-    kws = data.get("keywords") or []
-    if not isinstance(kws, list):
-        kws = []
-    keywords = [str(k).strip().lower() for k in kws if str(k).strip()][:12]
-    return {"description": desc, "keywords": keywords}
+    for candidate in (text, *_json_object_candidates(text)):
+        if not candidate:
+            continue
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        desc = str(data.get("description") or "").strip()[:200]
+        kws = data.get("keywords") or []
+        if not isinstance(kws, list):
+            kws = []
+        keywords = [str(k).strip().lower() for k in kws if str(k).strip()][:12]
+        if desc or keywords:
+            return {"description": desc, "keywords": keywords}
+    return {}
+
+
+def _json_object_candidates(text: str) -> list[str]:
+    """Extract JSON object substrings from prose + JSON LLM responses."""
+    out: list[str] = []
+    start = 0
+    while True:
+        i = text.find("{", start)
+        if i < 0:
+            break
+        depth = 0
+        for j in range(i, len(text)):
+            ch = text[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    out.append(text[i : j + 1])
+                    start = j + 1
+                    break
+        else:
+            break
+    return out
 
 
 async def _enrich_with_llm(
@@ -664,7 +688,7 @@ def _merge_item(
     if prefer_ai and ai and (ai.get("description") or ai.get("keywords")):
         description = str(ai.get("description") or "")
         keywords = list(ai.get("keywords") or [])
-        source = "ai"
+        source = str(ai.get("source") or "ai")
     elif user.get("description") or user.get("keywords"):
         if user.get("description"):
             description = str(user["description"])
@@ -805,11 +829,19 @@ async def refresh_index(
     return {"ok": True, "itemCount": len(merged), "enriched": enriched, "updatedAt": doc["updatedAt"]}
 
 
+def _looks_heuristic_cached(cached: dict[str, Any]) -> bool:
+    desc = str(cached.get("description") or "").strip()
+    if cached.get("source") == "heuristic":
+        return True
+    return bool(HEURISTIC_REPO_DESC_RE.match(desc) or HEURISTIC_BINARY_DESC_RE.match(desc))
+
+
 def _item_already_indexed(
     raw: dict[str, Any],
     *,
     annotations: dict[str, Any],
     cache: dict[str, Any],
+    force_reindex: bool = False,
 ) -> bool:
     item_id = raw["id"]
     content_hash = raw.get("contentHash", "")
@@ -817,7 +849,13 @@ def _item_already_indexed(
     if user.get("description") or user.get("keywords"):
         return True
     cached = cache.get(item_id) if isinstance(cache.get(item_id), dict) else {}
-    return cached.get("contentHash") == content_hash and bool(cached.get("description"))
+    if not cached.get("description"):
+        return False
+    if cached.get("contentHash") != content_hash:
+        return False
+    if force_reindex or _looks_heuristic_cached(cached):
+        return False
+    return True
 
 
 async def agentic_reindex(
@@ -828,6 +866,7 @@ async def agentic_reindex(
     models: dict[str, str] | None = None,
     on_event: EventCallback | None = None,
     should_cancel: CancelCheck | None = None,
+    force_reindex: bool = False,
 ) -> dict[str, Any]:
     """Two-phase agentic indexer: enumerate all items, then one bounded agent per item."""
     from contextful_sidecar.runtime.activity import append_activity
@@ -843,7 +882,8 @@ async def agentic_reindex(
         ws,
         scope=MODULE_ID,
         status="SCAN_START",
-        message="enumerating repos + meta files (1 item each)",
+        message="enumerating repos + meta files (1 item each)"
+        + (" forceReindex=true" if force_reindex else ""),
         run_id=run_id,
         module_id=MODULE_ID,
         activity_kind="scan_start",
@@ -883,9 +923,13 @@ async def agentic_reindex(
     append_eventlog(ws, MODULE_ID, "ENUMERATE", f"{total} items")
     on_event("index", {"phase": "enumerate", "total": total, "module": MODULE_ID})
 
+    indexed_check = lambda raw: _item_already_indexed(
+        raw, annotations=annotations, cache=cache, force_reindex=force_reindex
+    )
+
     skeleton: list[dict[str, Any]] = []
     for raw in raw_items:
-        if _item_already_indexed(raw, annotations=annotations, cache=cache):
+        if indexed_check(raw):
             merged = _merge_item(raw, annotations=annotations, cache=cache, ai=None)
             merged["status"] = "cached"
         else:
@@ -899,14 +943,14 @@ async def agentic_reindex(
 
     enriched = 0
     skipped = 0
-    pending_items = [r for r in raw_items if not _item_already_indexed(r, annotations=annotations, cache=cache)]
+    pending_items = [r for r in raw_items if not indexed_check(r)]
     pending_total = len(pending_items)
 
     for idx, raw in enumerate(raw_items, start=1):
         if should_cancel():
             break
         item_id = raw["id"]
-        if _item_already_indexed(raw, annotations=annotations, cache=cache):
+        if indexed_check(raw):
             skipped += 1
             log_step(
                 ws,
@@ -943,10 +987,11 @@ async def agentic_reindex(
             )
             continue
 
+        miss_status = "FORCE_REINDEX" if force_reindex else "CACHE_MISS"
         log_step(
             ws,
             scope=MODULE_ID,
-            status="CACHE_MISS",
+            status=miss_status,
             message=f"{item_id} ({idx}/{total})",
             run_id=run_id,
             module_id=MODULE_ID,
@@ -983,6 +1028,7 @@ async def agentic_reindex(
             ai = {
                 "description": _heuristic_description(raw["type"], raw.get("name", ""), raw.get("snippet") or ""),
                 "keywords": _heuristic_keywords(raw["type"], raw.get("name", ""), raw["path"]),
+                "source": "heuristic",
             }
         else:
             ai = await index_item(
@@ -1001,11 +1047,12 @@ async def agentic_reindex(
             break
 
         content_hash = raw.get("contentHash", "")
+        item_source = str(ai.get("source") or "heuristic")
         cache[item_id] = {
             "contentHash": content_hash,
             "description": ai.get("description"),
             "keywords": ai.get("keywords"),
-            "source": "ai",
+            "source": item_source,
             "enrichedAt": _now_iso(),
         }
         enriched += 1
@@ -1040,7 +1087,7 @@ async def agentic_reindex(
             ws,
             scope=MODULE_ID,
             status="INDEX_DONE",
-            message=f"{item_id} source=ai ({idx}/{total})",
+            message=f"{item_id} source={item_source} ({idx}/{total})",
             run_id=run_id,
             module_id=MODULE_ID,
             activity_kind="index_done",
@@ -1048,7 +1095,7 @@ async def agentic_reindex(
             itemIndex=idx,
             itemTotal=total,
             description=ai.get("description"),
-            source="ai",
+            source=item_source,
         )
         append_activity(
             ws,

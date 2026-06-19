@@ -6,6 +6,14 @@ export interface EventLogEntry {
   message: string;
 }
 
+export interface LogFilterOptions {
+  category?: LogFilter;
+  from?: Date | null;
+  to?: Date | null;
+  appVersion?: string;
+  modulesVersion?: string;
+}
+
 const LINE_RE = /^\[([^\]]+)\]\s+(\S+)\s+(\S+)(?:\s+—\s+(.*))?$/;
 
 export function parseEventLog(text: string): EventLogEntry[] {
@@ -18,6 +26,83 @@ export function parseEventLog(text: string): EventLogEntry[] {
     } else {
       out.push({ raw, ts: "", scope: "", status: "", message: raw });
     }
+  }
+  return out;
+}
+
+export function parseEntryTimestamp(entry: EventLogEntry): Date | null {
+  if (!entry.ts) return null;
+  const ms = Date.parse(entry.ts);
+  return Number.isNaN(ms) ? null : new Date(ms);
+}
+
+const APP_VERSION_RE = /\bapp=v(\d+\.\d+\.\d+)\b/;
+const MODULES_VERSION_RE = /\bmodules=v?(\d+\.\d+\.\d+)\b/;
+const MODULES_STATUS_RE = /\bmodules v(\d+\.\d+\.\d+)\b/;
+
+export function extractVersions(message: string): { app?: string; modules?: string } {
+  const out: { app?: string; modules?: string } = {};
+  const app = APP_VERSION_RE.exec(message);
+  if (app) out.app = app[1];
+  const mods = MODULES_VERSION_RE.exec(message) ?? MODULES_STATUS_RE.exec(message);
+  if (mods) out.modules = mods[1];
+  return out;
+}
+
+export function collectDistinctVersions(entries: EventLogEntry[]): {
+  app: string[];
+  modules: string[];
+} {
+  const app = new Set<string>();
+  const modules = new Set<string>();
+  for (const e of entries) {
+    const v = extractVersions(e.message);
+    if (v.app) app.add(v.app);
+    if (v.modules) modules.add(v.modules);
+  }
+  return {
+    app: [...app].sort(),
+    modules: [...modules].sort(),
+  };
+}
+
+export function filterByDateRange(
+  entries: EventLogEntry[],
+  from?: Date | null,
+  to?: Date | null,
+): EventLogEntry[] {
+  if (!from && !to) return entries;
+  return entries.filter((e) => {
+    const ts = parseEntryTimestamp(e);
+    if (!ts) return true;
+    if (from && ts < from) return false;
+    if (to && ts > to) return false;
+    return true;
+  });
+}
+
+export function filterByVersion(
+  entries: EventLogEntry[],
+  appVersion?: string,
+  modulesVersion?: string,
+): EventLogEntry[] {
+  if (!appVersion && !modulesVersion) return entries;
+  return entries.filter((e) => {
+    const v = extractVersions(e.message);
+    if (appVersion && v.app !== appVersion) return false;
+    if (modulesVersion && v.modules !== modulesVersion) return false;
+    return true;
+  });
+}
+
+export function applyLogFilters(
+  entries: EventLogEntry[],
+  options: LogFilterOptions,
+): EventLogEntry[] {
+  let out = filterByDateRange(entries, options.from, options.to);
+  out = filterByVersion(out, options.appVersion, options.modulesVersion);
+  if (options.category && options.category !== "ALL") {
+    out = filterEntries(out, options.category);
   }
   return out;
 }
@@ -47,6 +132,7 @@ const INDEX_STATUSES = new Set([
   "INDEX_DONE",
   "CACHE_HIT",
   "CACHE_MISS",
+  "FORCE_REINDEX",
 ]);
 
 export function filterEntries(entries: EventLogEntry[], filter: LogFilter): EventLogEntry[] {

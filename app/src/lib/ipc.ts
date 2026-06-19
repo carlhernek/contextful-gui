@@ -268,6 +268,7 @@ export const api = {
     runId: string;
     modules: string[];
     force: boolean;
+    forceReindex?: boolean;
     resume: boolean;
     specificInstructions?: string;
   }) =>
@@ -276,6 +277,7 @@ export const api = {
       runId: args.runId,
       modules: args.modules,
       force: args.force,
+      forceReindex: args.forceReindex ?? false,
       resume: args.resume,
       specificInstructions: args.specificInstructions ?? null,
     }),

@@ -36,6 +36,13 @@ body {
   scrollbar-color: var(--color-cf-border) transparent;
 }
 
+.cf-markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cf-markdown code {
+  overflow-wrap: anywhere;
+}
 .cf-markdown h1 {
   font-size: 1.4rem;
   font-weight: 700;
@@ -72,10 +79,14 @@ body {
   padding: 0.8rem;
   border-radius: 8px;
   overflow-x: auto;
+  max-width: 100%;
 }
 .cf-markdown table {
+  display: block;
   border-collapse: collapse;
   margin: 0.6rem 0;
+  overflow-x: auto;
+  max-width: 100%;
 }
 .cf-markdown th,
 .cf-markdown td {

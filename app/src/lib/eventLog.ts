@@ -35,12 +35,14 @@ const OPS_STATUSES = new Set([
   "ENUMERATE",
   "SCAN_START",
   "SCAN_DONE",
+  "SCAN_ITEM",
 ]);
 const OPS_SCOPES = new Set(["job", "git", "index", "gui", "run", "modules"]);
 const INDEX_STATUSES = new Set([
   "ENUMERATE",
   "SCAN_START",
   "SCAN_DONE",
+  "SCAN_ITEM",
   "INDEX_START",
   "INDEX_DONE",
   "CACHE_HIT",

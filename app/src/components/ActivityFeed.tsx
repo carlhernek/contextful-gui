@@ -43,6 +43,7 @@ function itemLabel(entry: ActivityEntry): string {
 const STEP_KINDS = new Set([
   "scan_start",
   "scan_done",
+  "scan_item",
   "index_start",
   "index_done",
   "cache_hit",
@@ -71,6 +72,7 @@ function itemStatus(entries: ActivityEntry[]): string {
   if (entries.some((e) => e.kind === "scan_start") && !entries.some((e) => e.kind === "scan_done")) {
     return "scanning";
   }
+  if (entries.some((e) => e.kind === "scan_item")) return "scanning";
   return "pending";
 }
 

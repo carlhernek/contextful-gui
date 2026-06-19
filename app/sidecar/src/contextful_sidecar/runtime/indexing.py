@@ -33,7 +33,9 @@ BINARY_EXTENSIONS = {
 }
 HASH_READ_CAP = 4 * 1024 * 1024       # 4MB max read for text hash
 ARTIFACT_HASH_CAP = 512 * 1024        # 512KB for run artefacts
-SCAN_TIMEOUT_SEC = 120.0
+GIT_HEAD_TIMEOUT_SEC = 3.0
+META_FILE_CAP = 500
+SCAN_DEBUG_FILE = "scan-debug.json"
 
 EventCallback = Callable[[str, Any], None]
 CancelCheck = Callable[[], bool]
@@ -82,11 +84,11 @@ def _git_head(repo_dir: Path) -> str | None:
             capture_output=True,
             text=True,
             env=_git_env(),
-            timeout=15,
+            timeout=GIT_HEAD_TIMEOUT_SEC,
         )
         if proc.returncode == 0:
             return proc.stdout.strip() or None
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
         pass
     return None
 
@@ -236,103 +238,321 @@ def _meta_file_fields(fp: Path) -> tuple[str, str, int] | None:
     return content_hash, snippet, st.st_size
 
 
-def scan_items(workspace: Path) -> list[dict[str, Any]]:
+def _iter_meta_files(meta_dir: Path) -> list[Path]:
+    """Stack walk of meta/ — no rglob, skip heavy dirs, cap file count."""
+    out: list[Path] = []
+    stack = [meta_dir]
+    while stack and len(out) < META_FILE_CAP:
+        current = stack.pop()
+        try:
+            children = sorted(current.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for child in children:
+            if child.name in SKIP_DIR_NAMES or child.name.startswith("."):
+                continue
+            if child.is_dir():
+                stack.append(child)
+            elif child.is_file():
+                out.append(child)
+                if len(out) >= META_FILE_CAP:
+                    break
+    return sorted(out, key=lambda p: p.as_posix().lower())
+
+
+def _scan_repo_item(workspace: Path, repo: dict[str, Any]) -> dict[str, Any]:
+    """One index entry per configured repo — minimal work at scan time."""
+    name = str(repo.get("name") or "").strip()
+    repo_dir = workspace / "repos" / name
+    cloned = repo_dir.is_dir() and repo_dir.joinpath(".git").exists()
+    head = _git_head(repo_dir) if cloned else None
+    rel_path = f"repos/{name}"
+    if cloned:
+        try:
+            st = repo_dir.stat()
+            mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))
+            content_hash = _sha1(f"{head or ''}:cloned:{mtime_ns}")
+        except OSError:
+            content_hash = _sha1(f"{head or ''}:cloned")
+        snippet = f"Repository {name}" + (f" @ {head}" if head else "")
+    else:
+        content_hash = _sha1(f"uncloned:{name}")
+        snippet = f"Repository {name} (not cloned)"
+    return {
+        "id": f"repo:{name}",
+        "type": "repo",
+        "path": rel_path,
+        "name": name,
+        "meta": {
+            "url": repo.get("url", ""),
+            "branch": repo.get("branch", "main"),
+            "head": head,
+            "cloned": cloned,
+        },
+        "entries": [],
+        "contentHash": content_hash,
+        "snippet": snippet,
+    }
+
+
+def _scan_meta_item(workspace: Path, meta_dir: Path, fp: Path) -> dict[str, Any]:
+    rel = fp.relative_to(workspace).as_posix()
+    rel_meta = fp.relative_to(meta_dir).as_posix()
+    fields = _meta_file_fields(fp)
+    if fields is None:
+        raise OSError(f"cannot read meta file: {rel_meta}")
+    content_hash, snippet, size = fields
+    return {
+        "id": f"meta:{rel_meta}",
+        "type": "meta",
+        "path": rel,
+        "name": fp.name,
+        "meta": {"size": size},
+        "entries": [],
+        "contentHash": content_hash,
+        "snippet": snippet,
+    }
+
+
+class ScanTrace:
+    """Collect per-step timing for scan debug dumps."""
+
+    def __init__(self) -> None:
+        self.steps: list[dict[str, Any]] = []
+        self.started_at = _now_iso()
+
+    def record(self, phase: str, **fields: Any) -> None:
+        self.steps.append({"ts": _now_iso(), "phase": phase, **fields})
+
+
+def _scan_debug_path(workspace: Path, run_id: str) -> Path:
+    return workspace / "runs" / run_id / "workspace-index" / SCAN_DEBUG_FILE
+
+
+def write_scan_debug(
+    workspace: Path,
+    run_id: str,
+    trace: ScanTrace,
+    *,
+    error: str,
+    items: list[dict[str, Any]] | None = None,
+) -> Path:
+    ws = Path(workspace)
+    meta = _read_project_meta(ws)
+    dump: dict[str, Any] = {
+        "error": error,
+        "startedAt": trace.started_at,
+        "failedAt": _now_iso(),
+        "runId": run_id,
+        "projectRepos": meta.get("repos") or [],
+        "itemCount": len(items or []),
+        "itemsFound": [i.get("id") for i in (items or [])],
+        "steps": trace.steps,
+        "lastStep": trace.steps[-1] if trace.steps else None,
+    }
+    path = _scan_debug_path(ws, run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dump, indent=2), encoding="utf-8")
+    return path
+
+
+def _scan_failure(
+    ws: Path,
+    run_id: str,
+    trace: ScanTrace,
+    error: str,
+    items: list[dict[str, Any]] | None = None,
+) -> None:
+    debug_path = write_scan_debug(ws, run_id, trace, error=error, items=items)
+    rel = debug_path.relative_to(ws).as_posix()
+    summary_lines = [f"{s.get('phase')}: {s.get('itemId') or s.get('path', '')}" for s in trace.steps[-20:]]
+    summary = "; ".join(summary_lines) if summary_lines else "no steps recorded"
+    msg = f"{error} — debug={rel} — steps: {summary}"
+    log_step(
+        ws,
+        scope="workspace-index",
+        status="ERROR",
+        message=msg,
+        run_id=run_id,
+        module_id="workspace-index",
+        activity_kind="error",
+        debugPath=rel,
+    )
+
+
+async def scan_items_async(
+    workspace: Path,
+    *,
+    run_id: str | None = None,
+    include_artifacts: bool = False,
+    on_event: EventCallback | None = None,
+    should_cancel: CancelCheck | None = None,
+) -> tuple[list[dict[str, Any]], ScanTrace]:
+    """Enumerate index items one-by-one with live logging (repos + meta files)."""
+    from contextful_sidecar.runtime.index_agent import MODULE_ID
+
+    ws = Path(workspace)
+    on_event = on_event or (lambda _e, _d: None)
+    should_cancel = should_cancel or (lambda: False)
+    trace = ScanTrace()
+    items: list[dict[str, Any]] = []
+    meta_cfg = _read_project_meta(ws)
+
+    def _log_item(status: str, message: str, item: dict[str, Any], *, ms: int) -> None:
+        if not run_id:
+            return
+        log_step(
+            ws,
+            scope=MODULE_ID,
+            status=status,
+            message=message,
+            run_id=run_id,
+            module_id=MODULE_ID,
+            activity_kind="scan_item",
+            itemId=item["id"],
+            path=item.get("path"),
+            durationMs=ms,
+        )
+        on_event("index", {
+            "phase": "scan_item",
+            "itemId": item["id"],
+            "path": item.get("path"),
+            "module": MODULE_ID,
+            "durationMs": ms,
+        })
+
+    trace.record("scan_begin", workspace=str(ws))
+    repos = meta_cfg.get("repos") or []
+    trace.record("repos_listed", count=len(repos))
+
+    for repo in repos:
+        if should_cancel():
+            raise asyncio.CancelledError()
+        if not isinstance(repo, dict):
+            trace.record("repo_skip", reason="invalid entry")
+            continue
+        name = str(repo.get("name") or "").strip()
+        if not name:
+            trace.record("repo_skip", reason="empty name")
+            continue
+        t0 = time.monotonic()
+        trace.record("repo_start", itemId=f"repo:{name}", path=f"repos/{name}")
+        try:
+            item = await asyncio.to_thread(_scan_repo_item, ws, repo)
+        except Exception as exc:  # noqa: BLE001
+            ms = int((time.monotonic() - t0) * 1000)
+            trace.record("repo_error", itemId=f"repo:{name}", error=str(exc), durationMs=ms)
+            raise RuntimeError(f"repo scan failed for {name}: {exc}") from exc
+        ms = int((time.monotonic() - t0) * 1000)
+        items.append(item)
+        trace.record("repo_done", itemId=item["id"], durationMs=ms, cloned=item["meta"].get("cloned"))
+        _log_item("SCAN_ITEM", f"repo {name} ({ms}ms)", item, ms=ms)
+        await asyncio.sleep(0)
+
+    meta_dir = ws / "meta"
+    if meta_dir.is_dir():
+        meta_files = await asyncio.to_thread(_iter_meta_files, meta_dir)
+        trace.record("meta_listed", count=len(meta_files))
+        if len(meta_files) >= META_FILE_CAP:
+            append_eventlog(ws, MODULE_ID, "WARN", f"meta file cap {META_FILE_CAP} reached")
+        for fp in meta_files:
+            if should_cancel():
+                raise asyncio.CancelledError()
+            rel_meta = fp.relative_to(meta_dir).as_posix()
+            t0 = time.monotonic()
+            trace.record("meta_start", itemId=f"meta:{rel_meta}", path=fp.as_posix())
+            try:
+                item = await asyncio.to_thread(_scan_meta_item, ws, meta_dir, fp)
+            except Exception as exc:  # noqa: BLE001
+                ms = int((time.monotonic() - t0) * 1000)
+                trace.record("meta_error", path=rel_meta, error=str(exc), durationMs=ms)
+                raise RuntimeError(f"meta scan failed for {rel_meta}: {exc}") from exc
+            ms = int((time.monotonic() - t0) * 1000)
+            items.append(item)
+            trace.record("meta_done", itemId=item["id"], durationMs=ms, size=item["meta"].get("size"))
+            _log_item("SCAN_ITEM", f"meta {rel_meta} ({ms}ms)", item, ms=ms)
+            await asyncio.sleep(0)
+    else:
+        trace.record("meta_missing", path=str(meta_dir))
+
+    if include_artifacts:
+        artifact_items = await asyncio.to_thread(_scan_artifact_items, ws)
+        for item in artifact_items:
+            items.append(item)
+            trace.record("artifact_done", itemId=item["id"])
+
+    trace.record("scan_complete", itemCount=len(items))
+    return items, trace
+
+
+def _scan_artifact_items(workspace: Path) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    runs_dir = workspace / "runs"
+    if not runs_dir.is_dir():
+        return items
+    run_dirs = sorted((p for p in runs_dir.iterdir() if p.is_dir()), reverse=True)[:5]
+    for run_dir in run_dirs:
+        run_id = run_dir.name
+        for mod_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
+            module_id = mod_dir.name
+            for fname in ARTIFACT_FILES:
+                fp = mod_dir / fname
+                if not fp.is_file():
+                    continue
+                fields = _artifact_file_fields(fp)
+                if fields is None:
+                    continue
+                content_hash, snippet = fields
+                rel = fp.relative_to(workspace).as_posix()
+                items.append({
+                    "id": f"artifact:{run_id}/{module_id}/{fname}",
+                    "type": "artifact",
+                    "path": rel,
+                    "name": fname,
+                    "meta": {"runId": run_id, "moduleId": module_id, "size": fp.stat().st_size},
+                    "entries": [],
+                    "contentHash": content_hash,
+                    "snippet": snippet,
+                })
+        summary = run_dir / "run-summary.md"
+        if summary.is_file():
+            fields = _artifact_file_fields(summary)
+            if fields is not None:
+                content_hash, snippet = fields
+                rel = summary.relative_to(workspace).as_posix()
+                items.append({
+                    "id": f"artifact:{run_id}/run-summary.md",
+                    "type": "artifact",
+                    "path": rel,
+                    "name": "run-summary.md",
+                    "meta": {"runId": run_id, "moduleId": None, "size": summary.stat().st_size},
+                    "entries": [],
+                    "contentHash": content_hash,
+                    "snippet": snippet,
+                })
+    return items
+
+
+def scan_items(workspace: Path, *, include_artifacts: bool = True) -> list[dict[str, Any]]:
+    """Synchronous full scan (tests + legacy refresh). Fast path: repos + meta only."""
     workspace = Path(workspace)
     meta = _read_project_meta(workspace)
     items: list[dict[str, Any]] = []
 
     for repo in meta.get("repos") or []:
-        if not isinstance(repo, dict):
-            continue
-        name = str(repo.get("name") or "").strip()
-        if not name:
-            continue
-        repo_dir = workspace / "repos" / name
-        cloned = repo_dir.joinpath(".git").exists()
-        head = _git_head(repo_dir) if cloned else None
-        rel_path = f"repos/{name}"
-        snippet = _content_snippet(workspace, rel_path, "repo", name) if cloned else ""
-        content_hash = _sha1(f"{head or ''}:{snippet[:512]}")
-        items.append({
-            "id": f"repo:{name}",
-            "type": "repo",
-            "path": rel_path,
-            "name": name,
-            "meta": {
-                "url": repo.get("url", ""),
-                "branch": repo.get("branch", "main"),
-                "head": head,
-                "cloned": cloned,
-            },
-            "entries": _repo_tree_entries(workspace, name) if cloned else [],
-            "contentHash": content_hash,
-            "snippet": snippet,
-        })
+        if isinstance(repo, dict) and str(repo.get("name") or "").strip():
+            items.append(_scan_repo_item(workspace, repo))
 
     meta_dir = workspace / "meta"
     if meta_dir.is_dir():
-        for fp in sorted(meta_dir.rglob("*")):
-            if not fp.is_file():
+        for fp in _iter_meta_files(meta_dir):
+            try:
+                items.append(_scan_meta_item(workspace, meta_dir, fp))
+            except OSError:
                 continue
-            rel = fp.relative_to(workspace).as_posix()
-            rel_meta = fp.relative_to(meta_dir).as_posix()
-            fields = _meta_file_fields(fp)
-            if fields is None:
-                continue
-            content_hash, snippet, size = fields
-            items.append({
-                "id": f"meta:{rel_meta}",
-                "type": "meta",
-                "path": rel,
-                "name": fp.name,
-                "meta": {"size": size},
-                "entries": [],
-                "contentHash": content_hash,
-                "snippet": snippet,
-            })
 
-    runs_dir = workspace / "runs"
-    if runs_dir.is_dir():
-        run_dirs = sorted((p for p in runs_dir.iterdir() if p.is_dir()), reverse=True)[:5]
-        for run_dir in run_dirs:
-            run_id = run_dir.name
-            for mod_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
-                module_id = mod_dir.name
-                for fname in ARTIFACT_FILES:
-                    fp = mod_dir / fname
-                    if not fp.is_file():
-                        continue
-                    fields = _artifact_file_fields(fp)
-                    if fields is None:
-                        continue
-                    content_hash, snippet = fields
-                    rel = fp.relative_to(workspace).as_posix()
-                    items.append({
-                        "id": f"artifact:{run_id}/{module_id}/{fname}",
-                        "type": "artifact",
-                        "path": rel,
-                        "name": fname,
-                        "meta": {"runId": run_id, "moduleId": module_id, "size": fp.stat().st_size},
-                        "entries": [],
-                        "contentHash": content_hash,
-                        "snippet": snippet,
-                    })
-            summary = run_dir / "run-summary.md"
-            if summary.is_file():
-                fields = _artifact_file_fields(summary)
-                if fields is not None:
-                    content_hash, snippet = fields
-                    rel = summary.relative_to(workspace).as_posix()
-                    items.append({
-                        "id": f"artifact:{run_id}/run-summary.md",
-                        "type": "artifact",
-                        "path": rel,
-                        "name": "run-summary.md",
-                        "meta": {"runId": run_id, "moduleId": None, "size": summary.stat().st_size},
-                        "entries": [],
-                        "contentHash": content_hash,
-                        "snippet": snippet,
-                    })
+    if include_artifacts:
+        items.extend(_scan_artifact_items(workspace))
 
     return items
 
@@ -614,30 +834,26 @@ async def agentic_reindex(
         ws,
         scope=MODULE_ID,
         status="SCAN_START",
-        message="scanning workspace items",
+        message="enumerating repos + meta files (1 item each)",
         run_id=run_id,
         module_id=MODULE_ID,
         activity_kind="scan_start",
     )
     scan_t0 = time.monotonic()
     try:
-        raw_items = await asyncio.wait_for(
-            asyncio.to_thread(scan_items, ws),
-            timeout=SCAN_TIMEOUT_SEC,
-        )
-    except TimeoutError:
-        msg = f"scan timed out after {int(SCAN_TIMEOUT_SEC)}s"
-        append_eventlog(ws, MODULE_ID, "ERROR", msg)
-        log_step(
+        raw_items, trace = await scan_items_async(
             ws,
-            scope=MODULE_ID,
-            status="ERROR",
-            message=msg,
             run_id=run_id,
-            module_id=MODULE_ID,
-            activity_kind="error",
+            include_artifacts=False,
+            on_event=on_event,
+            should_cancel=should_cancel,
         )
-        raise RuntimeError(msg) from None
+    except asyncio.CancelledError:
+        _scan_failure(ws, run_id, trace, "scan cancelled", items=[])
+        raise
+    except Exception as exc:
+        _scan_failure(ws, run_id, trace, str(exc), items=[])
+        raise
     scan_ms = int((time.monotonic() - scan_t0) * 1000)
     total = len(raw_items)
     log_step(

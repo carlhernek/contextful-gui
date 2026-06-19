@@ -5,7 +5,6 @@ import asyncio
 import hashlib
 import json
 import re
-import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +13,7 @@ from typing import Any, Callable
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.step_log import log_step
-from contextful_sidecar.runtime.tools import _git_env, _list_directory, _read_file, _silent_run
+from contextful_sidecar.runtime.tools import _list_directory
 
 INDEX_FILE = ".workspace-index.json"
 CACHE_FILE = ".index-cache.json"
@@ -33,7 +32,6 @@ BINARY_EXTENSIONS = {
 }
 HASH_READ_CAP = 4 * 1024 * 1024       # 4MB max read for text hash
 ARTIFACT_HASH_CAP = 512 * 1024        # 512KB for run artefacts
-GIT_HEAD_TIMEOUT_SEC = 3.0
 META_FILE_CAP = 500
 SCAN_DEBUG_FILE = "scan-debug.json"
 
@@ -72,25 +70,6 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     tmp.replace(path)
-
-
-def _git_head(repo_dir: Path) -> str | None:
-    if not repo_dir.joinpath(".git").exists():
-        return None
-    try:
-        proc = _silent_run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            env=_git_env(),
-            timeout=GIT_HEAD_TIMEOUT_SEC,
-        )
-        if proc.returncode == 0:
-            return proc.stdout.strip() or None
-    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
-        pass
-    return None
 
 
 def _read_project_meta(workspace: Path) -> dict[str, Any]:
@@ -260,13 +239,43 @@ def _iter_meta_files(meta_dir: Path) -> list[Path]:
     return sorted(out, key=lambda p: p.as_posix().lower())
 
 
+def _read_git_head_from_disk(repo_dir: Path) -> str | None:
+    """Read HEAD commit straight from .git files — no subprocess, no credential helper."""
+    git = repo_dir / ".git"
+    head_file = git / "HEAD"
+    try:
+        head = head_file.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if head.startswith("ref:"):
+        ref = head.split(" ", 1)[1].strip() if " " in head else ""
+        ref_path = git / ref
+        try:
+            return ref_path.read_text(encoding="utf-8", errors="replace").strip()[:12] or None
+        except OSError:
+            packed = git / "packed-refs"
+            try:
+                for line in packed.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if line.endswith(ref):
+                        return line.split(" ", 1)[0].strip()[:12] or None
+            except OSError:
+                return None
+            return None
+    return head[:12] or None
+
+
 def _scan_repo_item(workspace: Path, repo: dict[str, Any]) -> dict[str, Any]:
-    """One index entry per configured repo — minimal work at scan time."""
+    """One index entry per configured repo — pure on-disk, no git subprocess."""
     name = str(repo.get("name") or "").strip()
     repo_dir = workspace / "repos" / name
-    cloned = repo_dir.is_dir() and repo_dir.joinpath(".git").exists()
-    head = _git_head(repo_dir) if cloned else None
     rel_path = f"repos/{name}"
+    cloned = False
+    if repo_dir.is_dir():
+        try:
+            cloned = any(True for _ in repo_dir.iterdir())
+        except OSError:
+            cloned = False
+    head = _read_git_head_from_disk(repo_dir) if cloned else None
     if cloned:
         try:
             st = repo_dir.stat()

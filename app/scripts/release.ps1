@@ -13,7 +13,7 @@ if (-not $Version) {
 Write-Host "Running release gate..."
 & "$PSScriptRoot\release-gate.ps1"
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Release gate failed (exit $LASTEXITCODE) — aborting publish"
+    Write-Host "Release gate failed (exit $LASTEXITCODE) - aborting publish"
     exit $LASTEXITCODE
 }
 
@@ -24,10 +24,7 @@ if (-not (Test-Path $Nsis)) { throw "Missing installer: $Nsis" }
 if (-not (Test-Path $Msi)) { throw "Missing installer: $Msi" }
 
 Write-Host "Creating GitHub release v$Version..."
-gh release create "v$Version" `
-    --title "Contextful $Version" `
-    --notes "Release built via release-gate (frozen sidecar RPC-verified)." `
-    "$Nsis#Contextful_${Version}_x64-setup.exe" `
-    "$Msi#Contextful_${Version}_x64_en-US.msi"
+$notes = "Release built via release-gate (frozen sidecar RPC-verified)."
+gh release create "v$Version" --title "Contextful $Version" --notes $notes "$Nsis#Contextful_${Version}_x64-setup.exe" "$Msi#Contextful_${Version}_x64_en-US.msi"
 
 Write-Host "Published v$Version"

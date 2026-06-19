@@ -48,9 +48,9 @@ try {
 
 Write-Host ""
 if ($script:Failed -gt 0) {
-    Write-Host "$Failed release gate step(s) FAILED — do not publish"
+    Write-Host "$Failed release gate step(s) FAILED - do not publish"
     exit 1
 } else {
-    Write-Host "Release gate PASSED — safe to run scripts/release.ps1"
+    Write-Host "Release gate PASSED - safe to run scripts/release.ps1"
     exit 0
 }

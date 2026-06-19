@@ -89,7 +89,7 @@ export function TasksPanel({ tasksDoc, moduleId }: Props) {
           </button>
         </div>
       </div>
-      <KanbanBoard tasks={tasks} />
+      <KanbanBoard tasks={tasks} moduleId={moduleId} />
     </div>
   );
 }

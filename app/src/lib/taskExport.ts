@@ -1,4 +1,5 @@
 import type { TasksDoc } from "./ipc";
+import { formatTaskPrompt } from "./taskPrompt";
 
 export function tasksToJson(doc: TasksDoc): string {
   return JSON.stringify(doc, null, 2);
@@ -26,11 +27,11 @@ export function tasksToMarkdown(doc: TasksDoc): string {
       }
       lines.push("");
     }
-    if (t.agentic_spec?.trim()) {
-      lines.push("### Agentic spec");
+    if (t.agentic_spec?.trim() || t.evidence.length > 0) {
+      lines.push("### Agent prompt");
       lines.push("");
       lines.push("```");
-      lines.push(t.agentic_spec.trim());
+      lines.push(formatTaskPrompt(t, doc.moduleId).trimEnd());
       lines.push("```");
       lines.push("");
     }

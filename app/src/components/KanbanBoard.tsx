@@ -1,5 +1,6 @@
 import type { Task } from "../lib/ipc";
 import { priorityClass } from "../lib/statusStyles";
+import { TaskAgentPrompt } from "./TaskAgentPrompt";
 
 const COLUMNS: { key: Task["priority"]; label: string }[] = [
   { key: "high", label: "High" },
@@ -7,7 +8,13 @@ const COLUMNS: { key: Task["priority"]; label: string }[] = [
   { key: "low", label: "Low" },
 ];
 
-export function KanbanBoard({ tasks }: { tasks: Task[] }) {
+export function KanbanBoard({
+  tasks,
+  moduleId,
+}: {
+  tasks: Task[];
+  moduleId?: string | null;
+}) {
   if (!tasks.length) {
     return <p className="text-sm text-cf-muted">No tasks produced for this module.</p>;
   }
@@ -49,14 +56,7 @@ export function KanbanBoard({ tasks }: { tasks: Task[] }) {
                     </ul>
                   </details>
                 )}
-                {t.agentic_spec && (
-                  <details className="mt-2">
-                    <summary className="cursor-pointer text-xs text-cf-muted">agentic spec</summary>
-                    <p className="mt-1 break-words whitespace-pre-wrap text-xs text-cf-ink">
-                      {t.agentic_spec}
-                    </p>
-                  </details>
-                )}
+                <TaskAgentPrompt task={t} moduleId={moduleId} />
               </article>
             ))}
           </div>

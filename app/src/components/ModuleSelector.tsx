@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type ModuleInfo } from "../lib/ipc";
+import { PACKS, packFullySelected } from "../lib/modulePacks";
 import { useJob } from "../lib/jobs";
-
-const PACKS = ["Core", "Engineering", "Sales & Growth", "Onboarding & Docs", "Compliance & Risk"];
 
 interface Props {
   projectId: string;
@@ -18,17 +17,7 @@ export function ModuleSelector({ projectId, selected, onChange, refreshKey = 0 }
   const { isBusy } = useJob(undefined, projectId);
 
   useEffect(() => {
-    (async () => {
-      const mods = await api.listModules(projectId);
-      setModules(mods);
-      try {
-        const suggested = await api.getModuleSuggestions(projectId);
-        if (suggested.length) onChange(suggested.filter((s) => mods.some((m) => m.id === s)));
-      } catch {
-        /* ignore */
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void api.listModules(projectId).then(setModules);
   }, [projectId, refreshKey]);
 
   const hasWorkspaceIndex = modules.some((m) => m.id === WORKSPACE_INDEX_ID);
@@ -54,17 +43,24 @@ export function ModuleSelector({ projectId, selected, onChange, refreshKey = 0 }
       <div className="mb-3 flex items-center justify-between">
         <h3 className="font-semibold text-cf-ink">Modules</h3>
         <div className="flex flex-wrap gap-1">
-          {PACKS.map((p) => (
-            <button
-              key={p}
-              type="button"
-              className="rounded-full border border-cf-border px-2 py-0.5 text-xs text-cf-muted hover:bg-cf-surface-2 hover:text-cf-ink disabled:opacity-40"
-              onClick={() => applyPack(p)}
-              disabled={isBusy}
-            >
-              {p}
-            </button>
-          ))}
+          {PACKS.map((p) => {
+            const active = packFullySelected(p, modules, selected);
+            return (
+              <button
+                key={p}
+                type="button"
+                className={`rounded-full border px-2 py-0.5 text-xs disabled:opacity-40 ${
+                  active
+                    ? "border-cf-accent bg-cf-accent text-cf-accent-ink"
+                    : "border-cf-border text-cf-muted hover:bg-cf-surface-2 hover:text-cf-ink"
+                }`}
+                onClick={() => applyPack(p)}
+                disabled={isBusy}
+              >
+                {p}
+              </button>
+            );
+          })}
           <button
             type="button"
             className="rounded-full border border-cf-border px-2 py-0.5 text-xs text-cf-muted hover:bg-cf-surface-2 disabled:opacity-40"

@@ -49,6 +49,8 @@ pub struct ProjectMeta {
     #[serde(default)]
     pub models: serde_json::Map<String, Value>,
     #[serde(default)]
+    pub selected_modules: Vec<String>,
+    #[serde(default)]
     pub deleted: bool,
 }
 
@@ -63,6 +65,7 @@ impl ProjectMeta {
             project_type: default_project_type(),
             repos: Vec::new(),
             models: serde_json::Map::new(),
+            selected_modules: Vec::new(),
             deleted: false,
         }
     }
@@ -960,6 +963,29 @@ pub fn get_module_suggestions(install: &Path, id: &str) -> Vec<String> {
     suggested
 }
 
+pub fn get_module_selection(install: &Path, id: &str) -> Vec<String> {
+    let project = project_dir(install, id);
+    read_meta(&project)
+        .map(|m| m.selected_modules)
+        .unwrap_or_default()
+}
+
+pub fn set_module_selection(install: &Path, id: &str, modules: Vec<String>) -> Result<Vec<String>> {
+    let project = project_dir(install, id);
+    let valid: std::collections::HashSet<String> = list_modules(install, id)
+        .into_iter()
+        .filter_map(|v| v["id"].as_str().map(String::from))
+        .collect();
+    let filtered: Vec<String> = modules
+        .into_iter()
+        .filter(|m| valid.contains(m))
+        .collect();
+    let mut meta = read_meta(&project)?;
+    meta.selected_modules = filtered.clone();
+    write_meta(&project, &meta)?;
+    Ok(filtered)
+}
+
 // --- logs, runs, artifacts ------------------------------------------------
 pub fn get_event_log(install: &Path, id: &str) -> String {
     fs::read_to_string(project_dir(install, id).join(".eventlog")).unwrap_or_default()
@@ -1228,6 +1254,7 @@ mod tests {
                     branch: "main".to_string(),
                 }],
                 models: serde_json::Map::new(),
+                selected_modules: Vec::new(),
                 deleted: false,
             },
         )
@@ -1239,6 +1266,44 @@ mod tests {
         fs::write(path.join(file), "content\n").unwrap();
         git_run(&["add", "."], path).unwrap();
         git_run(&["-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-m", "init"], path).unwrap();
+    }
+
+    #[test]
+    fn module_selection_round_trip_filters_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        write_minimal_meta(&project, "P1");
+        fs::create_dir_all(project.join("modules/security-analysis")).unwrap();
+        fs::write(
+            project.join("modules/security-analysis/SKILL.md"),
+            "# Security",
+        )
+        .unwrap();
+        fs::create_dir_all(project.join("modules/accessibility-pass")).unwrap();
+        fs::write(
+            project.join("modules/accessibility-pass/SKILL.md"),
+            "# A11y",
+        )
+        .unwrap();
+
+        assert!(get_module_selection(install, "p1").is_empty());
+
+        let saved = set_module_selection(
+            install,
+            "p1",
+            vec![
+                "security-analysis".to_string(),
+                "unknown-module".to_string(),
+                "accessibility-pass".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            saved,
+            vec!["security-analysis".to_string(), "accessibility-pass".to_string()]
+        );
+        assert_eq!(get_module_selection(install, "p1"), saved);
     }
 
     #[test]

@@ -243,6 +243,9 @@ export const api = {
 
   listModules: (id: string) => invoke<ModuleInfo[]>("list_modules", { id }),
   getModuleSuggestions: (id: string) => invoke<string[]>("get_module_suggestions", { id }),
+  getModuleSelection: (id: string) => invoke<string[]>("get_module_selection", { id }),
+  setModuleSelection: (id: string, modules: string[]) =>
+    invoke<string[]>("set_module_selection", { id, modules }),
 
   getEventLog: (id: string) => invoke<string>("get_event_log", { id }),
   getRunLog: (id: string, runId: string) => invoke<string>("get_run_log", { id, runId }),

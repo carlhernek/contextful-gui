@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import { api, onContextfulEvent, type RunArtifacts } from "../lib/ipc";
 import { useRunProgress } from "../hooks/useRunProgress";
-import { KanbanBoard } from "./KanbanBoard";
+import { TasksPanel } from "./TasksPanel";
 import { IndexButton } from "./IndexButton";
 import { RunModuleProgress } from "./RunModuleProgress";
 import { Spinner } from "./Spinner";
@@ -88,9 +88,15 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
 
   const current = artifacts?.modules.find((m) => m.moduleId === active);
   const showActivity = tab === "activity" && active;
-  const showIndexActions =
-    active !== WORKSPACE_INDEX &&
-    Boolean(runId && active && (current?.hasAnalysis || current?.tasks));
+
+  const indexItem =
+    active !== WORKSPACE_INDEX && runId && active
+      ? tab === "analysis" && current?.hasAnalysis
+        ? { id: `artifact:${runId}/${active}/analysis.md`, title: "Index analysis artefact" }
+        : tab === "tasks" && current?.tasks
+          ? { id: `artifact:${runId}/${active}/tasks.json`, title: "Index tasks artefact" }
+          : null
+      : null;
 
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
@@ -136,22 +142,13 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
             Activity
           </button>
         </div>
-        {showIndexActions && (
+        {indexItem && (
           <div className="ml-auto flex shrink-0 gap-1">
-            {current?.hasAnalysis && (
-              <IndexButton
-                projectId={projectId}
-                itemId={`artifact:${runId}/${active}/analysis.md`}
-                title="Index analysis artefact"
-              />
-            )}
-            {current?.tasks && (
-              <IndexButton
-                projectId={projectId}
-                itemId={`artifact:${runId}/${active}/tasks.json`}
-                title="Index tasks artefact"
-              />
-            )}
+            <IndexButton
+              projectId={projectId}
+              itemId={indexItem.id}
+              title={indexItem.title}
+            />
           </div>
         )}
       </div>
@@ -162,7 +159,7 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
             <Markdown remarkPlugins={[remarkGfm, remarkBreaks]}>{analysis}</Markdown>
           </div>
         ) : tab === "tasks" ? (
-          <KanbanBoard tasks={current?.tasks?.tasks ?? []} />
+          <TasksPanel tasksDoc={current?.tasks ?? null} moduleId={active} />
         ) : showActivity ? (
           <ActivityFeed
             projectId={projectId}

@@ -396,6 +396,18 @@ fn get_module_suggestions(app: AppHandle, id: String) -> CmdResult<Vec<String>> 
     Ok(workspace::get_module_suggestions(&install, &id))
 }
 
+#[tauri::command]
+fn get_module_selection(app: AppHandle, id: String) -> CmdResult<Vec<String>> {
+    let install = install_path(&app)?;
+    Ok(workspace::get_module_selection(&install, &id))
+}
+
+#[tauri::command]
+fn set_module_selection(app: AppHandle, id: String, modules: Vec<String>) -> CmdResult<Vec<String>> {
+    let install = install_path(&app)?;
+    workspace::set_module_selection(&install, &id, modules).map_err(err)
+}
+
 // ===== logs / runs / artifacts ============================================
 #[tauri::command]
 fn get_event_log(app: AppHandle, id: String) -> CmdResult<String> {
@@ -775,6 +787,8 @@ pub fn run() {
             get_chatlog,
             list_modules,
             get_module_suggestions,
+            get_module_selection,
+            set_module_selection,
             get_event_log,
             get_run_log,
             get_run_state,

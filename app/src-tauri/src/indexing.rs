@@ -112,6 +112,7 @@ mod tests {
                 project_type: "both".to_string(),
                 repos: vec![],
                 models: serde_json::Map::new(),
+                selected_modules: vec![],
                 deleted: false,
             },
         )
@@ -183,6 +184,7 @@ mod tests {
                     branch: "develop".to_string(),
                 }],
                 models: serde_json::Map::new(),
+                selected_modules: vec![],
                 deleted: false,
             },
         )

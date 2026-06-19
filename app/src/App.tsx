@@ -13,6 +13,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { ActivityIndicator } from "./components/ActivityIndicator";
 import { Spinner } from "./components/Spinner";
 import { JobsProvider } from "./lib/jobs";
+import { useModuleSelection } from "./hooks/useModuleSelection";
 
 type Tab = "chat" | "pipeline" | "meta" | "repos" | "results" | "logs";
 
@@ -28,7 +29,7 @@ const TAB_LABELS: Record<Tab, string> = {
 function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () => void }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeId, setActiveId] = useState<string | null>(status.activeProject);
-  const [selected, setSelected] = useState<string[]>([]);
+  const { selected, setSelected } = useModuleSelection(activeId);
   const [tab, setTab] = useState<Tab>("pipeline");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [historyKey, setHistoryKey] = useState(0);
@@ -58,7 +59,6 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
   const selectProject = async (id: string) => {
     setActiveId(id);
     setActiveRunId(null);
-    setSelected([]);
     await api.setActiveProject(id);
   };
 

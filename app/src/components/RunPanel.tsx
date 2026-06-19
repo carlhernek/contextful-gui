@@ -1,28 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 import { api, onContextfulEvent, type RunState } from "../lib/ipc";
 import { useJob } from "../lib/jobs";
+import { useRunProgress } from "../hooks/useRunProgress";
+import { orderModules } from "../lib/runProgress";
 import { statusBannerClass } from "../lib/statusStyles";
+import { RunModuleProgress } from "./RunModuleProgress";
 import { Spinner } from "./Spinner";
 
 const STALL_HINT_MS = 45_000;
 const STALL_WARN_MS = 120_000;
 const STALL_TICK_MS = 5_000;
-const RUN_POLL_MS = 15_000;
 
 const LIVE_EVENTS = new Set(["token", "module", "turn", "tool", "activity", "heartbeat"]);
 
 interface Props {
   projectId: string;
   selected: string[];
+  onRunStart?: (runId: string) => void;
   onComplete: (runId: string) => void;
 }
 
-export function RunPanel({ projectId, selected, onComplete }: Props) {
+export function RunPanel({ projectId, selected, onRunStart, onComplete }: Props) {
   const { busy: running, stop, isBusy } = useJob("run", projectId);
   const [runId, setRunId] = useState<string | null>(null);
-  const [currentModule, setCurrentModule] = useState<string | null>(null);
   const [turn, setTurn] = useState<{ turn: number; maxTurns: number } | null>(null);
-  const [completed, setCompleted] = useState<string[]>([]);
   const [stall, setStall] = useState<string | null>(null);
   const [result, setResult] = useState<RunState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +31,13 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
   const [force, setForce] = useState(false);
   const [forceReindex, setForceReindex] = useState(false);
   const indexSelected = selected.includes("workspace-index");
+
+  const { stages } = useRunProgress(
+    projectId,
+    running && runId ? runId : null,
+    [],
+    orderModules(selected),
+  );
 
   useEffect(() => {
     if (!indexSelected) setForceReindex(false);
@@ -44,15 +52,9 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
         lastActivity.current = Date.now();
         setStall(null);
       }
-      if (e.event === "module") {
-        const d = e.data as { module: string; status: string; summary?: string };
-        if (d.status === "START") setCurrentModule(d.module);
-      } else if (e.event === "turn") {
+      if (e.event === "turn") {
         const d = e.data as { turn: number; maxTurns: number };
         setTurn({ turn: d.turn, maxTurns: d.maxTurns });
-      } else if (e.event === "run") {
-        const d = e.data as { completedModules: string[] };
-        setCompleted(d.completedModules ?? []);
       }
     }).then((fn) => (unlisten = fn));
     return () => unlisten?.();
@@ -65,32 +67,18 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
       if (idle > STALL_WARN_MS) setStall("Agent may be stuck");
       else if (idle > STALL_HINT_MS) setStall("Still working…");
     }, STALL_TICK_MS);
-    const pollTimer = setInterval(async () => {
-      if (runId) {
-        try {
-          const s = await api.getRunState(projectId, runId);
-          setCompleted(s.completedModules);
-        } catch {
-          /* ignore */
-        }
-      }
-    }, RUN_POLL_MS);
-    return () => {
-      clearInterval(stallTimer);
-      clearInterval(pollTimer);
-    };
-  }, [running, runId, projectId]);
+    return () => clearInterval(stallTimer);
+  }, [running]);
 
   const start = async () => {
     if (!selected.length || isBusy) return;
     setError(null);
     setResult(null);
-    setCompleted([]);
-    setCurrentModule(null);
     setTurn(null);
     lastActivity.current = Date.now();
     const id = await api.newRunId();
     setRunId(id);
+    onRunStart?.(id);
     try {
       const state = await api.startRun({
         id: projectId,
@@ -107,7 +95,7 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
       setError(String(e));
     } finally {
       setStall(null);
-      setCurrentModule(null);
+      setTurn(null);
     }
   };
 
@@ -166,15 +154,9 @@ export function RunPanel({ projectId, selected, onComplete }: Props) {
       )}
 
       {running && (
-        <div className="mt-3 space-y-1 text-sm">
-          {currentModule && (
-            <div className="text-cf-info">
-              Running <span className="font-medium">{currentModule}</span>
-              {turn && ` — turn ${turn.turn}/${turn.maxTurns}`}
-            </div>
-          )}
-          <div className="text-cf-muted">Completed: {completed.join(", ") || "none yet"}</div>
-          {stall && <div className="text-cf-warning">{stall}</div>}
+        <div className="mt-3 space-y-2">
+          <RunModuleProgress stages={stages} turn={turn} />
+          {stall && <div className="text-sm text-cf-warning">{stall}</div>}
         </div>
       )}
 

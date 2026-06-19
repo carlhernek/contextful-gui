@@ -9,7 +9,12 @@ import pytest
 
 from contextful_sidecar.runtime.agent import _turn_was_only_failed_fetch
 from contextful_sidecar.runtime.chat import detect_run_intent
-from contextful_sidecar.runtime.runs import filter_modules, load_run_state, save_run_state
+from contextful_sidecar.runtime.runs import (
+    _order_modules,
+    filter_modules,
+    load_run_state,
+    save_run_state,
+)
 from contextful_sidecar.runtime.schema import validate_tasks
 from contextful_sidecar import server
 
@@ -66,6 +71,13 @@ def test_run_state_resume_and_force(tmp_path: Path):
     forced = filter_modules(tmp_path, "r1", ["a", "b"], resume=True, force=True)
     assert forced["to_run"] == ["a", "b"]
     assert load_run_state(tmp_path, "r1")["completedModules"] == []
+
+
+def test_planned_modules_persisted_on_run_start(tmp_path: Path):
+    save_run_state(tmp_path, "r1", status="running", plannedModules=["a", "workspace-index"])
+    state = load_run_state(tmp_path, "r1")
+    assert state["plannedModules"] == ["a", "workspace-index"]
+    assert _order_modules(["workspace-index", "a", "b"]) == ["a", "b", "workspace-index"]
 
 
 # --- tasks schema ---------------------------------------------------------

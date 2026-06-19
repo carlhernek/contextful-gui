@@ -10,6 +10,7 @@ from typing import Any, Callable
 from contextful_sidecar.runtime.agent import run_agent
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.indexing import agentic_reindex
+from contextful_sidecar.runtime.module_config import get_max_turns
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.step_log import log_step
 
@@ -176,6 +177,13 @@ async def _run_modules_body(
         return {"runId": run_id, "status": "complete", "completedModules":
                 load_run_state(ws, run_id).get("completedModules", []), "alreadyComplete": True}
 
+    planned = _order_modules(modules)
+    prev = load_run_state(ws, run_id)
+    if force or not prev.get("plannedModules"):
+        planned_modules: list[str] = planned
+    else:
+        planned_modules = list(prev["plannedModules"])
+
     start_msg = f"runId={run_id} app=v{app_version} modules={version} ({len(to_run)} to run)"
     if force_reindex:
         start_msg += " forceReindex=true"
@@ -185,7 +193,10 @@ async def _run_modules_body(
         "START",
         start_msg,
     )
-    state = save_run_state(ws, run_id, status="running", error=None, failedModule=None)
+    state = save_run_state(
+        ws, run_id, status="running", error=None, failedModule=None,
+        plannedModules=planned_modules,
+    )
     completed = list(state.get("completedModules", []))
     on_event("run", {"runId": run_id, "status": "running", "completedModules": completed})
 
@@ -351,6 +362,7 @@ async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, r
                 module_id=module_id, run_id=run_id, repo_paths=repo_paths, meta_docs=meta_docs,
                 project_type=project_type, specific_instructions=specific_instructions,
                 on_event=on_event,
+                max_turns=get_max_turns(ws, module_id),
             )
             if summary.endswith("(incomplete)"):
                 raise RuntimeError(summary)

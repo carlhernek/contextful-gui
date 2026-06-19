@@ -87,6 +87,7 @@ export interface RunState {
   runId: string;
   status: "idle" | "running" | "failed" | "cancelled" | "complete";
   completedModules: string[];
+  plannedModules?: string[];
   failedModule?: string | null;
   error?: string | null;
   updatedAt?: string | null;

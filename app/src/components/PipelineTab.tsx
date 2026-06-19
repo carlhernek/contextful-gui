@@ -5,6 +5,7 @@ interface Props {
   projectId: string;
   selected: string[];
   onChangeSelected: (modules: string[]) => void;
+  onRunStart?: (runId: string) => void;
   onComplete: (runId: string) => void;
   modulesRefreshKey?: number;
 }
@@ -13,6 +14,7 @@ export function PipelineTab({
   projectId,
   selected,
   onChangeSelected,
+  onRunStart,
   onComplete,
   modulesRefreshKey,
 }: Props) {
@@ -24,7 +26,12 @@ export function PipelineTab({
         onChange={onChangeSelected}
         refreshKey={modulesRefreshKey}
       />
-      <RunPanel projectId={projectId} selected={selected} onComplete={onComplete} />
+      <RunPanel
+        projectId={projectId}
+        selected={selected}
+        onRunStart={onRunStart}
+        onComplete={onComplete}
+      />
     </div>
   );
 }

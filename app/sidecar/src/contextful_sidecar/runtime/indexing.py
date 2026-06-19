@@ -871,8 +871,10 @@ async def agentic_reindex(
     """Two-phase agentic indexer: enumerate all items, then one bounded agent per item."""
     from contextful_sidecar.runtime.activity import append_activity
     from contextful_sidecar.runtime.index_agent import MODULE_ID, index_item
+    from contextful_sidecar.runtime.module_config import get_index_max_turns
 
     ws = Path(workspace)
+    index_max_turns = get_index_max_turns(ws)
     on_event = on_event or (lambda _e, _d: None)
     should_cancel = should_cancel or (lambda: False)
     models = models or {}
@@ -1041,6 +1043,7 @@ async def agentic_reindex(
                 client=client,
                 on_event=on_event,
                 should_cancel=should_cancel,
+                max_turns=index_max_turns,
             )
 
         if should_cancel():

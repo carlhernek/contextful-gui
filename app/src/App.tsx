@@ -124,6 +124,10 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
               selected={selected}
               onChangeSelected={setSelected}
               modulesRefreshKey={modulesRefreshKey}
+              onRunStart={(runId) => {
+                setActiveRunId(runId);
+                setHistoryKey((k) => k + 1);
+              }}
               onComplete={(runId) => {
                 setActiveRunId(runId);
                 setHistoryKey((k) => k + 1);

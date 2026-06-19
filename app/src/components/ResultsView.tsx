@@ -3,8 +3,10 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import { api, onContextfulEvent, type RunArtifacts } from "../lib/ipc";
+import { useRunProgress } from "../hooks/useRunProgress";
 import { KanbanBoard } from "./KanbanBoard";
 import { IndexButton } from "./IndexButton";
+import { RunModuleProgress } from "./RunModuleProgress";
 import { Spinner } from "./Spinner";
 import { ActivityFeed } from "./ActivityFeed";
 import { useJob } from "../lib/jobs";
@@ -18,6 +20,8 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
   const [tab, setTab] = useState<"analysis" | "tasks" | "activity">("analysis");
   const [loading, setLoading] = useState(false);
   const { busy: runBusy } = useJob("run", projectId);
+  const artifactModuleIds = artifacts?.modules.map((m) => m.moduleId) ?? [];
+  const { stages } = useRunProgress(projectId, runId, artifactModuleIds);
 
   const loadArtifacts = async (id: string) => {
     setLoading(true);
@@ -90,6 +94,11 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
 
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
+      {stages.length > 1 && (
+        <div className="border-b border-cf-border px-3 py-2">
+          <RunModuleProgress stages={stages} compact />
+        </div>
+      )}
       <div className="flex items-center gap-1 overflow-x-auto border-b border-cf-border px-3 py-2">
         {artifacts?.modules.map((m) => (
           <button

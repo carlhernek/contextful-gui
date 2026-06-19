@@ -1057,6 +1057,26 @@ pub fn list_runs(install: &Path, id: &str) -> Vec<Value> {
     out
 }
 
+pub fn get_run_state(install: &Path, id: &str, run_id: &str) -> Value {
+    let state_path = project_dir(install, id)
+        .join(RUN_STATE_DIR)
+        .join(run_id)
+        .join(".run-state.json");
+    fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or_else(|| {
+            json!({
+                "runId": run_id,
+                "status": "idle",
+                "completedModules": [],
+                "failedModule": null,
+                "error": null,
+                "updatedAt": null,
+            })
+        })
+}
+
 pub fn get_run_artifacts(install: &Path, id: &str, run_id: &str) -> Value {
     let run_dir = project_dir(install, id).join(RUN_STATE_DIR).join(run_id);
     let mut modules = Vec::new();
@@ -1066,7 +1086,13 @@ pub fn get_run_artifacts(install: &Path, id: &str, run_id: &str) -> Value {
                 continue;
             }
             let mid = e.file_name().to_string_lossy().to_string();
-            let analysis = e.path().join("analysis.md").exists();
+            let analysis_path = e.path().join("analysis.md");
+            let has_analysis = analysis_path.exists();
+            let analysis = if has_analysis {
+                fs::read_to_string(&analysis_path).ok()
+            } else {
+                None
+            };
             let tasks_path = e.path().join("tasks.json");
             let tasks = fs::read_to_string(&tasks_path)
                 .ok()
@@ -1074,8 +1100,9 @@ pub fn get_run_artifacts(install: &Path, id: &str, run_id: &str) -> Value {
             let has_activity = e.path().join("activity.jsonl").exists();
             modules.push(json!({
                 "moduleId": mid,
-                "hasAnalysis": analysis,
+                "hasAnalysis": has_analysis,
                 "hasActivity": has_activity,
+                "analysis": analysis,
                 "tasks": tasks,
             }));
         }
@@ -1499,6 +1526,40 @@ mod tests {
         let entries = out["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["kind"], "turn");
+    }
+
+    #[test]
+    fn get_run_artifacts_includes_analysis_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        init_workspace_dirs(&project).unwrap();
+        let mod_dir = project.join("runs/run-1/security-analysis");
+        fs::create_dir_all(&mod_dir).unwrap();
+        fs::write(mod_dir.join("analysis.md"), "# Findings\n\nHello").unwrap();
+        let out = get_run_artifacts(install, "p1", "run-1");
+        let modules = out["modules"].as_array().unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0]["hasAnalysis"], true);
+        assert_eq!(modules[0]["analysis"], "# Findings\n\nHello");
+    }
+
+    #[test]
+    fn get_run_state_reads_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        init_workspace_dirs(&project).unwrap();
+        let run_dir = project.join("runs/run-1");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(
+            run_dir.join(".run-state.json"),
+            r#"{"runId":"run-1","status":"complete","completedModules":["mod-a"]}"#,
+        )
+        .unwrap();
+        let out = get_run_state(install, "p1", "run-1");
+        assert_eq!(out["status"], "complete");
+        assert_eq!(out["completedModules"][0], "mod-a");
     }
 
     #[test]

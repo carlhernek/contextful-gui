@@ -45,9 +45,15 @@ export function deriveModuleStages(
   planned: string[],
   state: RunState,
   currentModule: string | null,
+  finishedModuleIds: string[] = [],
 ): ModuleStage[] {
-  const runEnded = state.status === "failed" || state.status === "cancelled";
+  const runEnded =
+    state.status === "failed" || state.status === "cancelled" || state.status === "complete";
   const completed = new Set(state.completedModules);
+  for (const id of finishedModuleIds) {
+    if (state.status === "running" && currentModule === id) continue;
+    completed.add(id);
+  }
 
   return planned.map((id) => {
     if (state.failedModule === id) {

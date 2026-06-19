@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -13,29 +13,46 @@ import { useJob } from "../lib/jobs";
 
 const WORKSPACE_INDEX = "workspace-index";
 
+function finishedModules(artifacts: RunArtifacts | null): string[] {
+  return (
+    artifacts?.modules
+      .filter((m) => m.hasAnalysis || m.tasks)
+      .map((m) => m.moduleId) ?? []
+  );
+}
+
 export function ResultsView({ projectId, runId }: { projectId: string; runId: string | null }) {
   const [artifacts, setArtifacts] = useState<RunArtifacts | null>(null);
   const [active, setActive] = useState<string | null>(null);
-  const [analysis, setAnalysis] = useState<string>("");
   const [tab, setTab] = useState<"analysis" | "tasks" | "activity">("analysis");
   const [loading, setLoading] = useState(false);
   const { busy: runBusy } = useJob("run", projectId);
   const artifactModuleIds = artifacts?.modules.map((m) => m.moduleId) ?? [];
-  const { stages } = useRunProgress(projectId, runId, artifactModuleIds);
+  const finishedModuleIds = finishedModules(artifacts);
+  const { stages } = useRunProgress(
+    projectId,
+    runId,
+    artifactModuleIds,
+    [],
+    finishedModuleIds,
+  );
 
-  const loadArtifacts = async (id: string) => {
-    setLoading(true);
-    try {
-      const a = await api.getRunArtifacts(projectId, id);
-      setArtifacts(a);
-      setActive((prev) => {
-        if (prev && a.modules.some((m) => m.moduleId === prev)) return prev;
-        return a.modules[0]?.moduleId ?? null;
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
+  const loadArtifacts = useCallback(
+    async (id: string, quiet = false) => {
+      if (!quiet) setLoading(true);
+      try {
+        const a = await api.getRunArtifacts(projectId, id);
+        setArtifacts(a);
+        setActive((prev) => {
+          if (prev && a.modules.some((m) => m.moduleId === prev)) return prev;
+          return a.modules[0]?.moduleId ?? null;
+        });
+      } finally {
+        if (!quiet) setLoading(false);
+      }
+    },
+    [projectId],
+  );
 
   useEffect(() => {
     if (!runId) {
@@ -43,31 +60,28 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
       return;
     }
     void loadArtifacts(runId);
-  }, [projectId, runId]);
+  }, [projectId, runId, loadArtifacts]);
 
   useEffect(() => {
     if (!runId) return;
     let unlisten: (() => void) | undefined;
     onContextfulEvent((e) => {
-      if (
-        e.event === "module" ||
-        e.event === "run" ||
-        e.event === "index" ||
-        e.event === "activity"
-      ) {
-        void loadArtifacts(runId);
+      if (e.event === "module") {
+        const d = e.data as { status?: string };
+        if (d.status === "SUCCESS" || d.status === "ERROR") {
+          void loadArtifacts(runId, true);
+        }
+      } else if (e.event === "run") {
+        const d = e.data as { status?: string };
+        if (d.status && d.status !== "running") {
+          void loadArtifacts(runId, true);
+        }
+      } else if (e.event === "index") {
+        void loadArtifacts(runId, true);
       }
     }).then((fn) => (unlisten = fn));
     return () => unlisten?.();
-  }, [projectId, runId]);
-
-  useEffect(() => {
-    if (!runId || !active) return;
-    (async () => {
-      const res = await api.previewFile(projectId, `${runId}/${active}/analysis.md`, "runs");
-      setAnalysis(res.ok ? res.content ?? "" : `_${res.error}_`);
-    })();
-  }, [projectId, runId, active]);
+  }, [projectId, runId, loadArtifacts]);
 
   useEffect(() => {
     if (active === WORKSPACE_INDEX && runBusy) {
@@ -87,6 +101,7 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
   }
 
   const current = artifacts?.modules.find((m) => m.moduleId === active);
+  const analysis = current?.analysis ?? "";
   const showActivity = tab === "activity" && active;
 
   const indexItem =
@@ -155,9 +170,15 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
 
       <div className="min-w-0 flex-1 overflow-auto p-4">
         {tab === "analysis" ? (
-          <div className="cf-markdown max-w-3xl">
-            <Markdown remarkPlugins={[remarkGfm, remarkBreaks]}>{analysis}</Markdown>
-          </div>
+          loading && !analysis ? (
+            <Spinner />
+          ) : analysis ? (
+            <div className="cf-markdown max-w-3xl">
+              <Markdown remarkPlugins={[remarkGfm, remarkBreaks]}>{analysis}</Markdown>
+            </div>
+          ) : (
+            <p className="text-sm text-cf-muted">No analysis available for this module.</p>
+          )
         ) : tab === "tasks" ? (
           <TasksPanel tasksDoc={current?.tasks ?? null} moduleId={active} />
         ) : showActivity ? (

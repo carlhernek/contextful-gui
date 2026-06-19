@@ -20,6 +20,7 @@ export function useRunProgress(
   runId: string | null,
   artifactModuleIds: string[] = [],
   plannedFallback: string[] = [],
+  finishedModuleIds: string[] = [],
 ) {
   const [runState, setRunState] = useState<RunState | null>(null);
   const [currentModule, setCurrentModule] = useState<string | null>(null);
@@ -92,7 +93,7 @@ export function useRunProgress(
       ? orderModules(plannedFallback)
       : [];
   const stages: ModuleStage[] = runState
-    ? deriveModuleStages(planned, runState, currentModule)
+    ? deriveModuleStages(planned, runState, currentModule, finishedModuleIds)
     : [];
 
   return { runState, currentModule, planned, stages, refresh };

@@ -445,10 +445,11 @@ fn get_run_activity(
 }
 
 #[tauri::command]
-async fn get_run_state(app: AppHandle, state: State<'_, AppState>, id: String, run_id: String) -> CmdResult<Value> {
-    let workspace = project_workspace(&app, &id)?;
-    rpc(app, state.sidecar.clone(), "get_run_state",
-        json!({"workspace": workspace, "runId": run_id})).await
+async fn get_run_state(app: AppHandle, id: String, run_id: String) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    Ok(tauri::async_runtime::spawn_blocking(move || workspace::get_run_state(&install, &id, &run_id))
+        .await
+        .map_err(err)?)
 }
 
 // ===== module versioning ==================================================

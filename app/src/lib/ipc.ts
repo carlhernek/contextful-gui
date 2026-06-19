@@ -113,6 +113,7 @@ export interface ModuleArtifact {
   moduleId: string;
   hasAnalysis: boolean;
   hasActivity?: boolean;
+  analysis?: string | null;
   tasks: TasksDoc | null;
 }
 

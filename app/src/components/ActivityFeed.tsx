@@ -40,17 +40,62 @@ function itemLabel(entry: ActivityEntry): string {
   return "item";
 }
 
+const STEP_KINDS = new Set([
+  "scan_start",
+  "scan_done",
+  "index_start",
+  "index_done",
+  "cache_hit",
+  "cache_miss",
+  "llm_request",
+  "llm_response",
+]);
+
 function itemStatus(entries: ActivityEntry[]): string {
   const last = [...entries].reverse().find((e) => e.kind === "item");
   if (last?.status) return last.status;
   if (entries.some((e) => e.kind === "final" || e.kind === "error")) return "done";
-  if (entries.some((e) => e.kind === "turn" || e.kind === "thinking" || e.kind === "tool")) {
+  if (entries.some((e) => e.kind === "index_done" || e.kind === "cache_hit")) return "done";
+  if (
+    entries.some((e) =>
+      e.kind === "turn" ||
+      e.kind === "thinking" ||
+      e.kind === "tool" ||
+      e.kind === "index_start" ||
+      e.kind === "llm_request" ||
+      e.kind === "llm_response",
+    )
+  ) {
     return "indexing";
+  }
+  if (entries.some((e) => e.kind === "scan_start") && !entries.some((e) => e.kind === "scan_done")) {
+    return "scanning";
   }
   return "pending";
 }
 
+function stepLabel(entry: ActivityEntry): string {
+  if (entry.text?.trim()) return entry.text.trim();
+  const bits: string[] = [];
+  if (entry.path) bits.push(entry.path);
+  if (entry.durationMs != null) bits.push(`${entry.durationMs}ms`);
+  if (entry.itemIndex != null && entry.itemTotal != null) {
+    bits.push(`(${entry.itemIndex}/${entry.itemTotal})`);
+  }
+  if (entry.itemCount != null) bits.push(`${entry.itemCount} items`);
+  return bits.join(" ") || entry.kind.replace(/_/g, " ");
+}
+
 function FeedEntry({ entry }: { entry: ActivityEntry }) {
+  if (STEP_KINDS.has(entry.kind)) {
+    return (
+      <div className="font-mono text-xs text-cf-muted">
+        <span className="uppercase tracking-wide text-cf-info/80">{entry.kind.replace(/_/g, " ")}</span>
+        <span className="ml-2">{stepLabel(entry)}</span>
+      </div>
+    );
+  }
+
   switch (entry.kind) {
     case "turn":
       return (
@@ -209,7 +254,9 @@ export function ActivityFeed({ projectId, runId, moduleId, live = true }: Props)
   const truncated = !showAll && entries.length > MAX_VISIBLE_ENTRIES;
   const visibleEntries = truncated ? entries.slice(-MAX_VISIBLE_ENTRIES) : entries;
   const isIndexModule = moduleId === "workspace-index";
-  const groups = isIndexModule ? groupByItem(visibleEntries) : null;
+  const hasItemGroups = isIndexModule && visibleEntries.some((e) => e.itemId);
+  const groups = hasItemGroups ? groupByItem(visibleEntries) : null;
+  const flatSteps = isIndexModule && !hasItemGroups ? visibleEntries : null;
 
   if (entries.length === 0 && !hasStreaming) {
     return (
@@ -230,7 +277,13 @@ export function ActivityFeed({ projectId, runId, moduleId, live = true }: Props)
           Show all {entries.length} entries (showing last {MAX_VISIBLE_ENTRIES})
         </button>
       )}
-      {groups ? (
+      {flatSteps ? (
+        <div className="space-y-1">
+          {flatSteps.map((entry, i) => (
+            <FeedEntry key={entryKey(entry, i)} entry={entry} />
+          ))}
+        </div>
+      ) : groups ? (
         [...groups.entries()].map(([itemId, itemEntries]) => {
           const first = itemEntries[0];
           const status = itemStatus(itemEntries);

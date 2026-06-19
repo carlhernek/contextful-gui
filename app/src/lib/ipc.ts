@@ -132,6 +132,11 @@ export interface ActivityEntry {
   status?: string;
   description?: string;
   keywords?: string[];
+  durationMs?: number;
+  finishReason?: string;
+  toolCallCount?: number;
+  contentLength?: number;
+  itemCount?: number;
 }
 
 export interface RunActivity {

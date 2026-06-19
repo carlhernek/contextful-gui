@@ -11,6 +11,7 @@ from contextful_sidecar.runtime.indexing import (
     ANNOTATIONS_FILE,
     CACHE_FILE,
     INDEX_FILE,
+    _file_content_hash,
     build_index_document,
     format_index_for_prompt,
     refresh_index,
@@ -70,6 +71,27 @@ def test_scan_items_finds_repo_meta_artifact(workspace: Path):
     assert "repo:backoffice" in ids
     assert "meta:requirements.md" in ids
     assert "artifact:20260101-abc1/tech-debt/analysis.md" in ids
+
+
+def test_scan_items_binary_meta_uses_stat_hash(workspace: Path, monkeypatch):
+    docx = workspace / "meta" / "notes.docx"
+    docx.write_bytes(b"PK" + b"\x00" * 5000)
+    read_sizes: list[int] = []
+    original_read = Path.read_bytes
+
+    def tracked_read(self, *args, **kwargs):
+        read_sizes.append(1)
+        return original_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", tracked_read)
+    h1 = _file_content_hash(docx)
+    h2 = _file_content_hash(docx)
+    assert h1 == h2
+    assert read_sizes == []
+    items = scan_items(workspace)
+    meta = next(i for i in items if i["id"] == "meta:notes.docx")
+    assert meta["contentHash"] == h1
+    assert "binary file" in meta["snippet"]
 
 
 def test_refresh_index_enriches_and_caches(workspace: Path):

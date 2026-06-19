@@ -5,6 +5,8 @@ import { META_UPLOAD_FILTERS } from "../lib/metaUpload";
 import { FilePreview } from "./FilePreview";
 import { FileTree } from "./FileTree";
 import { IndexButton } from "./IndexButton";
+import { RenameMetaModal } from "./RenameMetaModal";
+import { CreateMetaFolderModal } from "./CreateMetaFolderModal";
 
 interface Props {
   projectId: string;
@@ -28,6 +30,11 @@ export function MetaDocumentsTab({ projectId }: Props) {
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{
+    path: string;
+    kind: "file" | "dir";
+  } | null>(null);
+  const [createFolderOpen, setCreateFolderOpen] = useState(false);
 
   const breadcrumbs = useMemo(() => {
     if (!cwd) return [{ label: "meta", path: "" }];
@@ -94,32 +101,13 @@ export function MetaDocumentsTab({ projectId }: Props) {
     }
   };
 
-  const createFolder = async () => {
-    const name = window.prompt("New folder name");
-    if (!name?.trim()) return;
-    const path = joinPath(cwd, name.trim());
-    setError(null);
-    try {
-      await api.createMetaDir(projectId, path);
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    }
+  const createFolder = () => {
+    setCreateFolderOpen(true);
   };
 
-  const rename = async () => {
-    if (!selectedPath) return;
-    const currentName = selectedPath.split("/").pop() ?? selectedPath;
-    const name = window.prompt("Rename to", currentName);
-    if (!name?.trim() || name.trim() === currentName) return;
-    setError(null);
-    try {
-      const newPath = await api.renameMetaEntry(projectId, selectedPath, name.trim());
-      setSelectedPath(newPath);
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    }
+  const rename = () => {
+    if (!selectedPath || !selectedKind) return;
+    setRenameTarget({ path: selectedPath, kind: selectedKind });
   };
 
   const moveToCurrentFolder = async () => {
@@ -207,7 +195,7 @@ export function MetaDocumentsTab({ projectId }: Props) {
                 <button
                   type="button"
                   className="rounded border border-cf-border px-2 py-0.5 text-xs text-cf-ink hover:bg-cf-surface-2"
-                  onClick={() => void rename()}
+                  onClick={rename}
                 >
                   Rename
                 </button>
@@ -260,6 +248,25 @@ export function MetaDocumentsTab({ projectId }: Props) {
           <FilePreview preview={preview} loading={loadingPreview} />
         )}
       </div>
+      <RenameMetaModal
+        open={renameTarget !== null}
+        projectId={projectId}
+        path={renameTarget?.path ?? ""}
+        kind={renameTarget?.kind ?? "file"}
+        onClose={() => setRenameTarget(null)}
+        onRenamed={(newPath) => {
+          setSelectedPath(newPath);
+          void refresh();
+        }}
+      />
+      <CreateMetaFolderModal
+        open={createFolderOpen}
+        projectId={projectId}
+        cwd={cwd}
+        existingNames={entries.filter((e) => e.kind === "dir").map((e) => e.name)}
+        onClose={() => setCreateFolderOpen(false)}
+        onCreated={() => void refresh()}
+      />
     </div>
   );
 }

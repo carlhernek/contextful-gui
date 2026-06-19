@@ -9,6 +9,8 @@ import { Spinner } from "./Spinner";
 import { ActivityFeed } from "./ActivityFeed";
 import { useJob } from "../lib/jobs";
 
+const WORKSPACE_INDEX = "workspace-index";
+
 export function ResultsView({ projectId, runId }: { projectId: string; runId: string | null }) {
   const [artifacts, setArtifacts] = useState<RunArtifacts | null>(null);
   const [active, setActive] = useState<string | null>(null);
@@ -63,6 +65,12 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
     })();
   }, [projectId, runId, active]);
 
+  useEffect(() => {
+    if (active === WORKSPACE_INDEX && runBusy) {
+      setTab("activity");
+    }
+  }, [active, runBusy]);
+
   if (!runId) {
     return <p className="p-6 text-sm text-cf-muted">Select a run to view results.</p>;
   }
@@ -76,6 +84,9 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
 
   const current = artifacts?.modules.find((m) => m.moduleId === active);
   const showActivity = tab === "activity" && active;
+  const showIndexActions =
+    active !== WORKSPACE_INDEX &&
+    Boolean(runId && active && (current?.hasAnalysis || current?.tasks));
 
   return (
     <div className="flex h-full flex-col">
@@ -95,38 +106,44 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
         ))}
       </div>
 
-      <div className="flex gap-1 px-3 pt-3">
-        <button
-          className={`rounded-md px-3 py-1 text-sm ${tab === "analysis" ? "bg-cf-accent text-cf-accent-ink" : "text-cf-muted hover:text-cf-ink"}`}
-          onClick={() => setTab("analysis")}
-        >
-          Analysis
-        </button>
-        {runId && active && (
-          <IndexButton
-            projectId={projectId}
-            itemId={`artifact:${runId}/${active}/analysis.md`}
-            title="Index analysis artefact"
-          />
-        )}
-        <button
-          className={`rounded-md px-3 py-1 text-sm ${tab === "tasks" ? "bg-cf-accent text-cf-accent-ink" : "text-cf-muted hover:text-cf-ink"}`}
-          onClick={() => setTab("tasks")}
-        >
-          Tasks ({current?.tasks?.tasks.length ?? 0})
-        </button>
-        <button
-          className={`rounded-md px-3 py-1 text-sm ${tab === "activity" ? "bg-cf-accent text-cf-accent-ink" : "text-cf-muted hover:text-cf-ink"}`}
-          onClick={() => setTab("activity")}
-        >
-          Activity
-        </button>
-        {runId && active && current?.tasks && (
-          <IndexButton
-            projectId={projectId}
-            itemId={`artifact:${runId}/${active}/tasks.json`}
-            title="Index tasks artefact"
-          />
+      <div className="flex w-full items-center gap-1 px-3 pt-3">
+        <div className="flex gap-1">
+          <button
+            className={`rounded-md px-3 py-1 text-sm ${tab === "analysis" ? "bg-cf-accent text-cf-accent-ink" : "text-cf-muted hover:text-cf-ink"}`}
+            onClick={() => setTab("analysis")}
+          >
+            Analysis
+          </button>
+          <button
+            className={`rounded-md px-3 py-1 text-sm ${tab === "tasks" ? "bg-cf-accent text-cf-accent-ink" : "text-cf-muted hover:text-cf-ink"}`}
+            onClick={() => setTab("tasks")}
+          >
+            Tasks ({current?.tasks?.tasks.length ?? 0})
+          </button>
+          <button
+            className={`rounded-md px-3 py-1 text-sm ${tab === "activity" ? "bg-cf-accent text-cf-accent-ink" : "text-cf-muted hover:text-cf-ink"}`}
+            onClick={() => setTab("activity")}
+          >
+            Activity
+          </button>
+        </div>
+        {showIndexActions && (
+          <div className="ml-auto flex shrink-0 gap-1">
+            {current?.hasAnalysis && (
+              <IndexButton
+                projectId={projectId}
+                itemId={`artifact:${runId}/${active}/analysis.md`}
+                title="Index analysis artefact"
+              />
+            )}
+            {current?.tasks && (
+              <IndexButton
+                projectId={projectId}
+                itemId={`artifact:${runId}/${active}/tasks.json`}
+                title="Index tasks artefact"
+              />
+            )}
+          </div>
         )}
       </div>
 

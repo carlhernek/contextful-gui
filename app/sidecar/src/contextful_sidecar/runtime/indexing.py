@@ -27,6 +27,13 @@ REPO_TREE_DEPTH = 2
 REPO_TREE_MAX_ENTRIES = 40
 ARTIFACT_FILES = ("analysis.md", "tasks.json", "run-summary.md")
 SKIP_DIR_NAMES = {".git", "node_modules", "target", "dist", "__pycache__", ".venv", "venv"}
+BINARY_EXTENSIONS = {
+    ".docx", ".doc", ".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".webp",
+    ".xlsx", ".xls", ".pptx", ".ppt", ".bin", ".exe", ".dll",
+}
+HASH_READ_CAP = 4 * 1024 * 1024       # 4MB max read for text hash
+ARTIFACT_HASH_CAP = 512 * 1024        # 512KB for run artefacts
+SCAN_TIMEOUT_SEC = 120.0
 
 EventCallback = Callable[[str, Any], None]
 CancelCheck = Callable[[], bool]
@@ -162,6 +169,73 @@ def _content_snippet(workspace: Path, path: str, item_type: str, repo_name: str 
     return ""
 
 
+def _stat_hash(path: Path) -> str:
+    st = path.stat()
+    mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))
+    return _sha1(f"stat:{st.st_size}:{mtime_ns}")
+
+
+def _is_binary_path(path: Path) -> bool:
+    return path.suffix.lower() in BINARY_EXTENSIONS
+
+
+def _file_content_hash(path: Path, *, read_cap: int = HASH_READ_CAP) -> str:
+    """Hash file content without reading large binaries whole."""
+    if _is_binary_path(path):
+        return _stat_hash(path)
+    try:
+        st = path.stat()
+    except OSError:
+        return _sha1("")
+    if st.st_size > read_cap:
+        return _stat_hash(path)
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return _sha1("")
+    return _sha1(raw)
+
+
+def _file_snippet(path: Path) -> str:
+    if _is_binary_path(path):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return ""
+        return f"binary file ({size} bytes)"
+    try:
+        data = path.read_bytes()[:CONTENT_HEAD_CAP]
+        return data.decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _artifact_file_fields(fp: Path) -> tuple[str, str] | None:
+    """Return (content_hash, snippet) for a run artefact, or None on skip."""
+    try:
+        st = fp.stat()
+    except OSError:
+        return None
+    if st.st_size > ARTIFACT_HASH_CAP:
+        return _stat_hash(fp), f"artefact ({st.st_size} bytes, hash from metadata)"
+    try:
+        raw = fp.read_bytes()
+    except OSError:
+        return None
+    snippet = raw[:CONTENT_HEAD_CAP].decode("utf-8", errors="replace")
+    return _sha1(raw), snippet
+
+
+def _meta_file_fields(fp: Path) -> tuple[str, str, int] | None:
+    try:
+        st = fp.stat()
+    except OSError:
+        return None
+    content_hash = _file_content_hash(fp)
+    snippet = _file_snippet(fp)
+    return content_hash, snippet, st.st_size
+
+
 def scan_items(workspace: Path) -> list[dict[str, Any]]:
     workspace = Path(workspace)
     meta = _read_project_meta(workspace)
@@ -202,19 +276,18 @@ def scan_items(workspace: Path) -> list[dict[str, Any]]:
                 continue
             rel = fp.relative_to(workspace).as_posix()
             rel_meta = fp.relative_to(meta_dir).as_posix()
-            try:
-                raw = fp.read_bytes()
-            except OSError:
+            fields = _meta_file_fields(fp)
+            if fields is None:
                 continue
-            snippet = raw[:CONTENT_HEAD_CAP].decode("utf-8", errors="replace")
+            content_hash, snippet, size = fields
             items.append({
                 "id": f"meta:{rel_meta}",
                 "type": "meta",
                 "path": rel,
                 "name": fp.name,
-                "meta": {"size": fp.stat().st_size},
+                "meta": {"size": size},
                 "entries": [],
-                "contentHash": _sha1(raw),
+                "contentHash": content_hash,
                 "snippet": snippet,
             })
 
@@ -229,12 +302,11 @@ def scan_items(workspace: Path) -> list[dict[str, Any]]:
                     fp = mod_dir / fname
                     if not fp.is_file():
                         continue
-                    try:
-                        raw = fp.read_bytes()
-                    except OSError:
+                    fields = _artifact_file_fields(fp)
+                    if fields is None:
                         continue
+                    content_hash, snippet = fields
                     rel = fp.relative_to(workspace).as_posix()
-                    snippet = raw[:CONTENT_HEAD_CAP].decode("utf-8", errors="replace")
                     items.append({
                         "id": f"artifact:{run_id}/{module_id}/{fname}",
                         "type": "artifact",
@@ -242,27 +314,25 @@ def scan_items(workspace: Path) -> list[dict[str, Any]]:
                         "name": fname,
                         "meta": {"runId": run_id, "moduleId": module_id, "size": fp.stat().st_size},
                         "entries": [],
-                        "contentHash": _sha1(raw),
+                        "contentHash": content_hash,
                         "snippet": snippet,
                     })
             summary = run_dir / "run-summary.md"
             if summary.is_file():
-                try:
-                    raw = summary.read_bytes()
-                except OSError:
-                    continue
-                rel = summary.relative_to(workspace).as_posix()
-                snippet = raw[:CONTENT_HEAD_CAP].decode("utf-8", errors="replace")
-                items.append({
-                    "id": f"artifact:{run_id}/run-summary.md",
-                    "type": "artifact",
-                    "path": rel,
-                    "name": "run-summary.md",
-                    "meta": {"runId": run_id, "moduleId": None, "size": summary.stat().st_size},
-                    "entries": [],
-                    "contentHash": _sha1(raw),
-                    "snippet": snippet,
-                })
+                fields = _artifact_file_fields(summary)
+                if fields is not None:
+                    content_hash, snippet = fields
+                    rel = summary.relative_to(workspace).as_posix()
+                    items.append({
+                        "id": f"artifact:{run_id}/run-summary.md",
+                        "type": "artifact",
+                        "path": rel,
+                        "name": "run-summary.md",
+                        "meta": {"runId": run_id, "moduleId": None, "size": summary.stat().st_size},
+                        "entries": [],
+                        "contentHash": content_hash,
+                        "snippet": snippet,
+                    })
 
     return items
 
@@ -550,7 +620,24 @@ async def agentic_reindex(
         activity_kind="scan_start",
     )
     scan_t0 = time.monotonic()
-    raw_items = await asyncio.to_thread(scan_items, ws)
+    try:
+        raw_items = await asyncio.wait_for(
+            asyncio.to_thread(scan_items, ws),
+            timeout=SCAN_TIMEOUT_SEC,
+        )
+    except TimeoutError:
+        msg = f"scan timed out after {int(SCAN_TIMEOUT_SEC)}s"
+        append_eventlog(ws, MODULE_ID, "ERROR", msg)
+        log_step(
+            ws,
+            scope=MODULE_ID,
+            status="ERROR",
+            message=msg,
+            run_id=run_id,
+            module_id=MODULE_ID,
+            activity_kind="error",
+        )
+        raise RuntimeError(msg) from None
     scan_ms = int((time.monotonic() - scan_t0) * 1000)
     total = len(raw_items)
     log_step(

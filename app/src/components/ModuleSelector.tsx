@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, type ModuleInfo } from "../lib/ipc";
-import { PACKS, packFullySelected } from "../lib/modulePacks";
+import { PACKS, packFullySelected, packModuleIds } from "../lib/modulePacks";
 import { useJob } from "../lib/jobs";
+import { ModuleAccordion } from "./ModuleAccordion";
 
 interface Props {
   projectId: string;
@@ -21,11 +22,6 @@ export function ModuleSelector({ projectId, selected, onChange, refreshKey = 0 }
   }, [projectId, refreshKey]);
 
   const hasWorkspaceIndex = modules.some((m) => m.id === WORKSPACE_INDEX_ID);
-  const sorted = [...modules].sort((a, b) => {
-    if (a.id === WORKSPACE_INDEX_ID) return -1;
-    if (b.id === WORKSPACE_INDEX_ID) return 1;
-    return a.title.localeCompare(b.title);
-  });
 
   const toggle = (id: string) => {
     if (isBusy) return;
@@ -34,15 +30,26 @@ export function ModuleSelector({ projectId, selected, onChange, refreshKey = 0 }
 
   const applyPack = (pack: string) => {
     if (isBusy) return;
-    const ids = modules.filter((m) => m.packs.includes(pack)).map((m) => m.id);
+    const ids = packModuleIds(modules, pack);
     onChange(Array.from(new Set([...selected, ...ids])));
+  };
+
+  const selectPackSection = (ids: string[]) => {
+    if (isBusy) return;
+    onChange(Array.from(new Set([...selected, ...ids])));
+  };
+
+  const clearPackSection = (ids: string[]) => {
+    if (isBusy) return;
+    const remove = new Set(ids);
+    onChange(selected.filter((id) => !remove.has(id)));
   };
 
   return (
     <div className="rounded-lg border border-cf-border bg-cf-surface p-4">
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between gap-2">
         <h3 className="font-semibold text-cf-ink">Modules</h3>
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap justify-end gap-1">
           {PACKS.map((p) => {
             const active = packFullySelected(p, modules, selected);
             return (
@@ -84,29 +91,14 @@ export function ModuleSelector({ projectId, selected, onChange, refreshKey = 0 }
         </p>
       )}
 
-      <div className="grid grid-cols-2 gap-1">
-        {sorted.map((m) => (
-          <label
-            key={m.id}
-            className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${
-              isBusy ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-cf-surface-2"
-            }`}
-          >
-            <input
-              type="checkbox"
-              checked={selected.includes(m.id)}
-              onChange={() => toggle(m.id)}
-              disabled={isBusy}
-            />
-            <span className="text-cf-ink">
-              {m.title}
-              {m.id === WORKSPACE_INDEX_ID && (
-                <span className="ml-1 text-xs text-cf-muted">(indexing)</span>
-              )}
-            </span>
-          </label>
-        ))}
-      </div>
+      <ModuleAccordion
+        modules={modules}
+        selected={selected}
+        disabled={isBusy}
+        onToggle={toggle}
+        onSelectPack={selectPackSection}
+        onClearPack={clearPackSection}
+      />
     </div>
   );
 }

@@ -989,7 +989,13 @@ pub fn list_modules(install: &Path, id: &str) -> Vec<Value> {
             if path.is_dir() && path.join("SKILL.md").exists() {
                 let mid = e.file_name().to_string_lossy().to_string();
                 let title = module_title(&path.join("SKILL.md")).unwrap_or_else(|| readable(&mid));
-                out.push(json!({"id": mid, "title": title, "packs": packs_for(&mid)}));
+                let description = module_description(&path.join("SKILL.md"));
+                out.push(json!({
+                    "id": mid,
+                    "title": title,
+                    "description": description,
+                    "packs": packs_for(&mid),
+                }));
             }
         }
     }
@@ -1013,6 +1019,29 @@ fn module_title(skill: &Path) -> Option<String> {
         .lines()
         .find(|l| l.starts_with("# "))
         .map(|l| l.trim_start_matches("# ").trim().to_string())
+}
+
+/// First paragraph line under `## Scope` in SKILL.md (max 160 chars).
+fn module_description(skill: &Path) -> Option<String> {
+    let content = fs::read_to_string(skill).ok()?;
+    let mut in_scope = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "## Scope" {
+            in_scope = true;
+            continue;
+        }
+        if in_scope {
+            if trimmed.starts_with("## ") {
+                break;
+            }
+            if !trimmed.is_empty() {
+                let desc: String = trimmed.chars().take(160).collect();
+                return Some(desc);
+            }
+        }
+    }
+    None
 }
 
 fn readable(id: &str) -> String {
@@ -1040,6 +1069,7 @@ fn packs_for(module_id: &str) -> Vec<&'static str> {
         "cicd-pipeline-audit",
         "api-surface-analysis",
         "tech-debt-triage",
+        "test-coverage",
     ];
     let sales = [
         "swot-analysis",
@@ -1430,6 +1460,26 @@ mod tests {
         });
         assert!(git_batch_has_failures(&results));
         assert!(git_batch_failure_message(&results).contains("Personal Access Token"));
+    }
+
+    #[test]
+    fn module_description_parses_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = tmp.path().join("SKILL.md");
+        fs::write(
+            &skill,
+            "# CI/CD Pipeline Audit\n\n## Scope\nEvaluate the quality of CI/CD configuration.\n\n## Inputs\n",
+        )
+        .unwrap();
+        assert_eq!(
+            module_description(&skill).as_deref(),
+            Some("Evaluate the quality of CI/CD configuration.")
+        );
+    }
+
+    #[test]
+    fn packs_for_includes_test_coverage() {
+        assert!(packs_for("test-coverage").contains(&"Engineering"));
     }
 
     fn write_minimal_meta(project: &Path, display_name: &str) {

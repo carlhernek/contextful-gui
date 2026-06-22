@@ -86,6 +86,7 @@ export interface PreviewResult {
 export interface ModuleInfo {
   id: string;
   title: string;
+  description?: string | null;
   packs: string[];
 }
 

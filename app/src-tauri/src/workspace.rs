@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::git_credentials;
 use crate::prereqs::silent_command;
 
 /// TEMPLATE_REPO points the GUI repo at the files/template repo (spec 1.5).
@@ -72,6 +74,93 @@ impl ProjectMeta {
 }
 
 // --- git helpers ----------------------------------------------------------
+/// Extract hostname from https, http, or git@ URLs.
+pub fn git_host_from_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+        let authority = rest.split('/').next()?;
+        return Some(authority.rsplit('@').next()?.to_string());
+    }
+    if let Some(rest) = url.strip_prefix("git@") {
+        return rest.split(':').next().map(|s| s.to_string());
+    }
+    if let Some(rest) = url.strip_prefix("ssh://git@") {
+        return rest.split('/').next().map(|s| s.to_string());
+    }
+    None
+}
+
+pub fn unique_git_hosts(urls: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String> {
+    let mut hosts: Vec<String> = urls
+        .into_iter()
+        .filter_map(|u| git_host_from_url(u.as_ref()))
+        .map(|h| git_credentials::normalize_host(&h))
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+fn https_user_and_path(url: &str) -> Option<(Option<String>, String)> {
+    let (scheme_len, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (8, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (7, r)
+    } else {
+        return None;
+    };
+    let path_start = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..path_start];
+    let path = &url[scheme_len + path_start..];
+    if let Some((user, host)) = authority.rsplit_once('@') {
+        let user = if user.is_empty() { None } else { Some(user.to_string()) };
+        Some((user, format!("{host}{path}")))
+    } else {
+        Some((None, format!("{authority}{path}")))
+    }
+}
+
+fn authenticated_https_url(url: &str, pat: &str) -> String {
+    let Some((user, host_path)) = https_user_and_path(url) else {
+        return url.to_string();
+    };
+    match user {
+        Some(u) => format!("https://{u}:{pat}@{host_path}"),
+        None => format!("https://:{pat}@{host_path}"),
+    }
+}
+
+fn authenticated_clone_url(url: &str) -> String {
+    let Some(host) = git_host_from_url(url) else {
+        return url.to_string();
+    };
+    let Ok(Some(pat)) = git_credentials::load(&host) else {
+        return url.to_string();
+    };
+    if url.starts_with("https://") || url.starts_with("http://") {
+        authenticated_https_url(url, &pat)
+    } else {
+        url.to_string()
+    }
+}
+
+fn append_git_auth(cmd: &mut Command, url: &str) {
+    let Some(host) = git_host_from_url(url) else {
+        return;
+    };
+    let Ok(Some(pat)) = git_credentials::load(&host) else {
+        return;
+    };
+    let (user, _) = https_user_and_path(url).unwrap_or((None, String::new()));
+    let creds = match user {
+        Some(u) => format!("{u}:{pat}"),
+        None => format!(":{pat}"),
+    };
+    let header = STANDARD.encode(creds);
+    cmd.arg("-c")
+        .arg(format!("http.extraHeader=Authorization: Basic {header}"));
+}
+
 fn git_command() -> Command {
     let mut cmd = silent_command("git");
     cmd.env("GIT_TERMINAL_PROMPT", "0")
@@ -81,7 +170,15 @@ fn git_command() -> Command {
 }
 
 fn git_run(args: &[&str], cwd: &Path) -> Result<String> {
-    let output = git_command()
+    git_run_authed(args, cwd, None)
+}
+
+fn git_run_authed(args: &[&str], cwd: &Path, auth_url: Option<&str>) -> Result<String> {
+    let mut cmd = git_command();
+    if let Some(url) = auth_url {
+        append_git_auth(&mut cmd, url);
+    }
+    let output = cmd
         .args(args)
         .current_dir(cwd)
         .output()
@@ -100,10 +197,14 @@ fn git_run_anywhere(args: &[&str]) -> Result<String> {
 
 /// Git commands permitted on read-only target repos (no push/commit).
 const REPO_GIT_ALLOWED: &[&str] = &[
-    "clone", "fetch", "pull", "merge", "status", "rev-parse", "branch", "log", "config",
+    "clone", "fetch", "pull", "merge", "status", "rev-parse", "branch", "log", "config", "remote",
 ];
 
 fn repo_git_run(args: &[&str], cwd: &Path) -> Result<String> {
+    repo_git_run_authed(args, cwd, None)
+}
+
+fn repo_git_run_authed(args: &[&str], cwd: &Path, auth_url: Option<&str>) -> Result<String> {
     let Some(cmd) = args.first() else {
         bail!("empty git args");
     };
@@ -113,7 +214,7 @@ fn repo_git_run(args: &[&str], cwd: &Path) -> Result<String> {
     if args.iter().any(|a| *a == "push") {
         bail!("git push is disabled on target repositories");
     }
-    git_run(args, cwd)
+    git_run_authed(args, cwd, auth_url)
 }
 
 fn harden_readonly_repo(repo_dir: &Path) -> Result<()> {
@@ -409,7 +510,15 @@ fn append_git_batch_summary(project: &Path, operation: &str, ok_count: usize, to
     );
 }
 
+fn repo_remote_url(repo_dir: &Path) -> Option<String> {
+    repo_git_run(&["remote", "get-url", "origin"], repo_dir)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn clone_one(url: &str, branch: &str, dest: &Path) -> Result<()> {
+    let auth_url = authenticated_clone_url(url);
     let cwd = dest.parent().unwrap_or(Path::new("."));
     repo_git_run(
         &[
@@ -418,7 +527,7 @@ fn clone_one(url: &str, branch: &str, dest: &Path) -> Result<()> {
             "1",
             "--branch",
             branch,
-            url,
+            &auth_url,
             dest.to_str().context("dest path")?,
         ],
         cwd,
@@ -426,7 +535,7 @@ fn clone_one(url: &str, branch: &str, dest: &Path) -> Result<()> {
     .map(|_| ())
     .or_else(|_| {
         repo_git_run(
-            &["clone", "--depth", "1", url, dest.to_str().unwrap()],
+            &["clone", "--depth", "1", &auth_url, dest.to_str().unwrap()],
             cwd,
         )
         .map(|_| ())
@@ -438,7 +547,9 @@ fn classify_git_error(stderr: &str) -> &'static str {
     if s.contains("authentication")
         || s.contains("permission denied")
         || s.contains("could not read")
+        || s.contains("terminal prompts disabled")
         || s.contains("403")
+        || s.contains("401")
         || s.contains("publickey")
     {
         "auth"
@@ -450,6 +561,33 @@ fn classify_git_error(stderr: &str) -> &'static str {
         "transient"
     } else {
         "other"
+    }
+}
+
+/// True when any entry in a clone/pull results payload failed.
+pub fn git_batch_has_failures(results: &Value) -> bool {
+    results
+        .get("results")
+        .and_then(|r| r.as_array())
+        .is_some_and(|arr| arr.iter().any(|r| r.get("ok") == Some(&json!(false))))
+}
+
+pub fn git_batch_failure_message(results: &Value) -> String {
+    let Some(arr) = results.get("results").and_then(|r| r.as_array()) else {
+        return "repository operation failed".to_string();
+    };
+    let failed = arr.iter().filter(|r| r.get("ok") == Some(&json!(false))).count();
+    let auth = arr
+        .iter()
+        .filter(|r| r.get("ok") == Some(&json!(false)) && r.get("kind") == Some(&json!("auth")))
+        .count();
+    if auth > 0 {
+        format!(
+            "{failed}/{} failed — add a Personal Access Token under Git credentials (e.g. dev.azure.com)",
+            arr.len()
+        )
+    } else {
+        format!("{failed}/{} repositories failed", arr.len())
     }
 }
 
@@ -510,7 +648,8 @@ pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
         } else {
             repo.branch.clone()
         };
-        let fetch_result = repo_git_run(&["fetch", "origin", &branch], &dest);
+        let auth_url = repo_remote_url(&dest).unwrap_or_else(|| repo.url.clone());
+        let fetch_result = repo_git_run_authed(&["fetch", "origin", &branch], &dest, Some(&auth_url));
         match fetch_result {
             Ok(_) => {
                 let merge_ref = format!("origin/{branch}");
@@ -1267,6 +1406,31 @@ pub fn template_version_of(install: &Path, id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_host_from_azure_url() {
+        let url = "https://VikingAssistanceGroupAS@dev.azure.com/VikingAssistanceGroupAS/viking-assistance/_git/api";
+        assert_eq!(git_host_from_url(url), Some("dev.azure.com".to_string()));
+    }
+
+    #[test]
+    fn authenticated_https_url_injects_pat() {
+        let url = "https://user@dev.azure.com/org/_git/repo";
+        let out = authenticated_https_url(url, "pat123");
+        assert_eq!(out, "https://user:pat123@dev.azure.com/org/_git/repo");
+    }
+
+    #[test]
+    fn git_batch_failure_message_auth() {
+        let results = json!({
+            "results": [
+                {"ok": false, "kind": "auth"},
+                {"ok": true},
+            ]
+        });
+        assert!(git_batch_has_failures(&results));
+        assert!(git_batch_failure_message(&results).contains("Personal Access Token"));
+    }
 
     fn write_minimal_meta(project: &Path, display_name: &str) {
         init_workspace_dirs(project).unwrap();

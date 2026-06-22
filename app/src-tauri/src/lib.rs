@@ -1,5 +1,6 @@
 //! Contextful Tauri core: command surface + app wiring (spec section 10).
 
+mod git_credentials;
 mod indexing;
 mod jobs;
 mod prereqs;
@@ -130,6 +131,55 @@ fn stored_api_key_masked() -> CmdResult<Option<String>> {
     secrets::masked_api_key().map_err(err)
 }
 
+// ===== git credentials (HTTPS PAT per host) ===============================
+#[tauri::command]
+fn list_git_credential_hosts(app: AppHandle, id: String) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    let meta = workspace::read_meta(&workspace::project_dir(&install, &id)).map_err(err)?;
+    let from_repos = workspace::unique_git_hosts(meta.repos.iter().map(|r| r.url.as_str()));
+    let s = settings::load_settings(&app).unwrap_or_default();
+    let mut hosts: Vec<String> = s.git_credential_hosts.clone();
+    for h in from_repos {
+        if !hosts.iter().any(|x| x == &h) {
+            hosts.push(h);
+        }
+    }
+    hosts.sort();
+    let configured: Vec<Value> = hosts
+        .iter()
+        .map(|h| {
+            json!({
+                "host": h,
+                "configured": git_credentials::load(h).ok().flatten().is_some(),
+                "masked": git_credentials::masked(h).ok().flatten(),
+            })
+        })
+        .collect();
+    Ok(json!({ "hosts": configured }))
+}
+
+#[tauri::command]
+fn set_git_credential(app: AppHandle, host: String, token: String) -> CmdResult<()> {
+    let host = git_credentials::normalize_host(&host);
+    git_credentials::save(&host, &token).map_err(err)?;
+    let mut s = settings::load_settings(&app).unwrap_or_default();
+    if !s.git_credential_hosts.iter().any(|h| h == &host) {
+        s.git_credential_hosts.push(host);
+        s.git_credential_hosts.sort();
+        settings::save_settings(&app, &s).map_err(err)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_git_credential(app: AppHandle, host: String) -> CmdResult<()> {
+    let host = git_credentials::normalize_host(&host);
+    git_credentials::delete(&host).map_err(err)?;
+    let mut s = settings::load_settings(&app).unwrap_or_default();
+    s.git_credential_hosts.retain(|h| h != &host);
+    settings::save_settings(&app, &s).map_err(err)
+}
+
 // ===== settings & models ==================================================
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Value {
@@ -232,6 +282,10 @@ async fn clone_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> 
         .map_err(err);
     if let Err(ref e) = clone_result {
         guard.fail_with("git", &format!("clone failed — {e}"));
+    } else if let Ok(ref val) = clone_result {
+        if workspace::git_batch_has_failures(val) {
+            guard.fail_with("git", &workspace::git_batch_failure_message(val));
+        }
     }
     drop(guard);
     clone_result
@@ -257,6 +311,10 @@ async fn pull_repos(app: AppHandle, state: State<'_, AppState>, id: String) -> C
         .map_err(err);
     if let Err(ref e) = pull_result {
         guard.fail_with("git", &format!("pull failed — {e}"));
+    } else if let Ok(ref val) = pull_result {
+        if workspace::git_batch_has_failures(val) {
+            guard.fail_with("git", &workspace::git_batch_failure_message(val));
+        }
     }
     drop(guard);
     pull_result
@@ -762,6 +820,9 @@ pub fn run() {
             set_api_key,
             clear_api_key,
             stored_api_key_masked,
+            list_git_credential_hosts,
+            set_git_credential,
+            clear_git_credential,
             get_settings,
             set_models,
             list_models,

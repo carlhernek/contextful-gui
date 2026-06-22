@@ -1,22 +1,33 @@
 import { useEffect, useState } from "react";
-import { api, type RepoStatus } from "../lib/ipc";
+import { api, type GitCredentialHost, type RepoStatus } from "../lib/ipc";
 import { useJob } from "../lib/jobs";
 import { IndexButton } from "./IndexButton";
 import { Spinner } from "./Spinner";
 
 export function RepositoriesTab({ projectId }: { projectId: string }) {
   const [repos, setRepos] = useState<RepoStatus[]>([]);
+  const [credHosts, setCredHosts] = useState<GitCredentialHost[]>([]);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [branch, setBranch] = useState("develop");
   const [pullTarget, setPullTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [credHost, setCredHost] = useState("dev.azure.com");
+  const [credToken, setCredToken] = useState("");
+  const [credBusy, setCredBusy] = useState(false);
   const { busy: cloneBusy } = useJob("clone", projectId);
   const { busy: pullBusy } = useJob("pull", projectId);
   const { isBusy } = useJob(undefined, projectId);
   const repoBusy = cloneBusy || pullBusy || isBusy;
 
-  const refresh = async () => setRepos(await api.listRepos(projectId));
+  const refresh = async () => {
+    setRepos(await api.listRepos(projectId));
+    const creds = await api.listGitCredentialHosts(projectId);
+    setCredHosts(creds.hosts);
+    if (creds.hosts.length > 0 && !creds.hosts.some((h) => h.host === credHost)) {
+      setCredHost(creds.hosts[0].host);
+    }
+  };
 
   useEffect(() => {
     void refresh();
@@ -63,6 +74,36 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
     }
   };
 
+  const saveCredential = async () => {
+    const host = credHost.trim();
+    const token = credToken.trim();
+    if (!host || !token) return;
+    setCredBusy(true);
+    setError(null);
+    try {
+      await api.setGitCredential(host, token);
+      setCredToken("");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCredBusy(false);
+    }
+  };
+
+  const clearCredential = async (host: string) => {
+    setCredBusy(true);
+    setError(null);
+    try {
+      await api.clearGitCredential(host);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCredBusy(false);
+    }
+  };
+
   const reportFailures = (results: { ok: boolean; error?: string; kind?: string }[]) => {
     const failed = results.filter((r) => !r.ok);
     if (failed.length) {
@@ -70,7 +111,7 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
         failed
           .map((f) =>
             f.kind === "auth"
-              ? `Auth failed — set up system git auth and retry. ${f.error}`
+              ? `Authentication failed for HTTPS — add a Personal Access Token below (host: dev.azure.com for Azure DevOps). ${f.error ?? ""}`
               : f.error
           )
           .join("\n")
@@ -81,7 +122,67 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
   return (
     <div className="mx-auto max-w-4xl rounded-lg border border-cf-border bg-cf-surface p-4">
       <div className="mb-3 rounded-md border border-cf-border bg-cf-surface-2 px-3 py-2 text-xs text-cf-muted">
-        Target repositories are read-only mirrors — push is disabled.
+        Target repositories are read-only mirrors — push is disabled. Private HTTPS remotes (e.g.
+        Azure DevOps) need a Personal Access Token stored below; SSH remotes use your system SSH
+        keys.
+      </div>
+
+      <h3 className="mb-2 font-semibold text-cf-ink">Git credentials (HTTPS)</h3>
+      <div className="mb-4 rounded-md border border-cf-border bg-cf-surface-2 p-3">
+        <p className="mb-2 text-xs text-cf-muted">
+          Tokens are stored in the OS keychain. For Azure DevOps, create a PAT with Code (read)
+          scope and save it for <span className="font-mono">dev.azure.com</span>.
+        </p>
+        <div className="mb-2 flex flex-wrap gap-2">
+          <input
+            className="min-w-[10rem] rounded-md border border-cf-border bg-cf-surface px-2 py-1.5 font-mono text-sm text-cf-ink"
+            placeholder="dev.azure.com"
+            value={credHost}
+            onChange={(e) => setCredHost(e.target.value)}
+            disabled={credBusy || repoBusy}
+            list="git-cred-hosts"
+          />
+          <datalist id="git-cred-hosts">
+            {credHosts.map((h) => (
+              <option key={h.host} value={h.host} />
+            ))}
+          </datalist>
+          <input
+            type="password"
+            className="min-w-[12rem] flex-1 rounded-md border border-cf-border bg-cf-surface px-2 py-1.5 text-sm text-cf-ink"
+            placeholder="Personal Access Token"
+            value={credToken}
+            onChange={(e) => setCredToken(e.target.value)}
+            disabled={credBusy || repoBusy}
+          />
+          <button
+            type="button"
+            className="rounded-md bg-cf-accent px-3 py-1.5 text-sm font-medium text-cf-accent-ink hover:opacity-90 disabled:opacity-40"
+            onClick={() => void saveCredential()}
+            disabled={credBusy || repoBusy || !credHost.trim() || !credToken.trim()}
+          >
+            {credBusy ? <Spinner size={12} /> : "Save token"}
+          </button>
+        </div>
+        {credHosts.some((h) => h.configured) && (
+          <div className="flex flex-wrap gap-2 text-xs text-cf-muted">
+            {credHosts
+              .filter((h) => h.configured)
+              .map((h) => (
+                <span key={h.host} className="inline-flex items-center gap-1">
+                  {h.host}: {h.masked ?? "saved"}
+                  <button
+                    type="button"
+                    className="text-cf-danger hover:underline"
+                    disabled={credBusy || repoBusy}
+                    onClick={() => void clearCredential(h.host)}
+                  >
+                    clear
+                  </button>
+                </span>
+              ))}
+          </div>
+        )}
       </div>
 
       <h3 className="mb-3 font-semibold text-cf-ink">Project repositories</h3>
@@ -95,7 +196,7 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
         />
         <input
           className="rounded-md border border-cf-border bg-cf-surface-2 px-2 py-1.5 text-sm text-cf-ink outline-none focus:border-cf-accent"
-          placeholder="git@github.com:org/repo.git"
+          placeholder="https://dev.azure.com/org/project/_git/repo"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
         />

@@ -17,6 +17,9 @@ pub struct AppSettings {
     pub install_path: Option<String>,
     #[serde(default)]
     pub active_project: Option<String>,
+    /// Hosts with a stored git HTTPS token (e.g. dev.azure.com).
+    #[serde(default)]
+    pub git_credential_hosts: Vec<String>,
 }
 
 pub fn load_settings<R: Runtime>(app: &AppHandle<R>) -> Result<AppSettings> {

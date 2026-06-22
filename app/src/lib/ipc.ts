@@ -45,6 +45,12 @@ export interface RepoStatus {
   head?: string | null;
 }
 
+export interface GitCredentialHost {
+  host: string;
+  configured: boolean;
+  masked?: string | null;
+}
+
 export interface MetaEntry {
   name: string;
   path: string;
@@ -200,6 +206,12 @@ export const api = {
   setApiKey: (key: string) => invoke<void>("set_api_key", { key }),
   clearApiKey: () => invoke<void>("clear_api_key"),
   storedApiKeyMasked: () => invoke<string | null>("stored_api_key_masked"),
+
+  listGitCredentialHosts: (id: string) =>
+    invoke<{ hosts: GitCredentialHost[] }>("list_git_credential_hosts", { id }),
+  setGitCredential: (host: string, token: string) =>
+    invoke<void>("set_git_credential", { host, token }),
+  clearGitCredential: (host: string) => invoke<void>("clear_git_credential", { host }),
 
   getSettings: () => invoke<SetupStatus>("get_settings"),
   setModels: (projectId: string, models: Record<string, string>) =>

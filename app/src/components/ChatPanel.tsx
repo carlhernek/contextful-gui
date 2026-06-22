@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, onContextfulEvent, type ChatMessage } from "../lib/ipc";
+import { MarkdownContent } from "./MarkdownContent";
 import { Spinner } from "./Spinner";
 
 interface Props {
@@ -80,20 +81,24 @@ export function ChatPanel({ projectId, onRunIntent }: Props) {
               className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
             >
               <div
-                className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
+                className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
                   m.role === "user"
-                    ? "bg-cf-accent text-cf-accent-ink"
-                    : "bg-cf-surface-2 text-cf-ink"
+                    ? "whitespace-pre-wrap bg-cf-accent text-cf-accent-ink"
+                    : "overflow-x-auto bg-cf-surface-2 text-cf-ink"
                 }`}
               >
-                {m.content}
+                {m.role === "user" ? (
+                  m.content
+                ) : (
+                  <MarkdownContent className="cf-markdown--chat">{m.content}</MarkdownContent>
+                )}
               </div>
             </div>
           ))}
           {streaming && (
             <div className="flex justify-start">
-              <div className="max-w-[85%] rounded-lg bg-cf-surface-2 px-3 py-2 text-sm whitespace-pre-wrap text-cf-ink">
-                {streaming}
+              <div className="max-w-[85%] overflow-x-auto rounded-lg bg-cf-surface-2 px-3 py-2 text-sm text-cf-ink">
+                <MarkdownContent className="cf-markdown--chat">{streaming}</MarkdownContent>
               </div>
             </div>
           )}

@@ -1,6 +1,6 @@
 [project]
 name = "contextful-sidecar"
-version = "1.2.16"
+version = "1.2.17"
 description = "Contextful NDJSON stdio sidecar: agent loop + tools over OpenRouter."
 readme = "README.md"
 requires-python = ">=3.12"

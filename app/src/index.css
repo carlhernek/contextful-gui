@@ -93,3 +93,10 @@ body {
   border: 1px solid var(--color-cf-border);
   padding: 0.3rem 0.6rem;
 }
+.cf-markdown.cf-markdown--chat h2:first-child,
+.cf-markdown.cf-markdown--chat h3:first-child {
+  margin-top: 0;
+}
+.cf-markdown.cf-markdown--chat > *:last-child {
+  margin-bottom: 0;
+}

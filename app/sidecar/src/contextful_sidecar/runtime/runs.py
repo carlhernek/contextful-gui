@@ -366,6 +366,11 @@ async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, r
             )
             if summary.endswith("(incomplete)"):
                 raise RuntimeError(summary)
+            out_dir = ws / "runs" / run_id / module_id
+            if not (out_dir / "analysis.md").is_file() or not (out_dir / "tasks.json").is_file():
+                raise RuntimeError(
+                    f"{role} finished without analysis.md and tasks.json in runs/{run_id}/{module_id}/"
+                )
             return summary, None
         except asyncio.CancelledError:
             return "", "cancelled"

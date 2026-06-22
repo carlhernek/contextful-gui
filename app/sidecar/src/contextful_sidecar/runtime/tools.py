@@ -14,6 +14,7 @@ import httpx
 
 from contextful_sidecar.runtime.file_text import is_binary_path, read_file_as_text, read_text_snippet
 from contextful_sidecar.runtime.eventlog import append_eventlog
+from contextful_sidecar.runtime.repo_path_policy import check_repo_path, filter_repo_children
 
 READ_FILE_CAP = 500_000          # 500KB cap for read_file
 WEB_FETCH_CAP = 100_000          # 100k chars for web_fetch
@@ -25,6 +26,14 @@ GATHER_CONTEXT_CAP = 24_000        # chars for gather_context bundle
 GATHER_DOC_EXCERPT = 3000          # per doc file excerpt
 GATHER_TREE_DEPTH = 2
 GATHER_TREE_MAX = 40
+
+# Extra ripgrep globs — block common secrets even if tracked in git.
+_RG_SECRET_GLOBS = (
+    "!.env", "!.env.*", "!.npmrc", "!.pypirc", "!.netrc", "!.htpasswd",
+    "!*.pem", "!*.key", "!*.p12", "!*.pfx", "!*.jks", "!*.keystore",
+    "!id_rsa", "!id_dsa", "!id_ecdsa", "!id_ed25519",
+    "!**/.ssh/**",
+)
 
 PROVENANCE_HEADER = (
     "<!-- online research, not original repo material -->\n"
@@ -283,6 +292,8 @@ def _read_file(workspace: Path, path: str) -> str:
         return f"ERROR: '{path}' is a directory; use list_directory"
     if not target.exists():
         return "ERROR: file not found"
+    if blocked := check_repo_path(workspace, target):
+        return blocked
     return read_file_as_text(target, cap=READ_FILE_CAP)
 
 
@@ -293,7 +304,7 @@ def _list_directory(workspace: Path, path: str = ".") -> str:
     if not target.is_dir():
         return f"ERROR: '{path}' is not a directory"
     entries = []
-    for child in sorted(target.iterdir()):
+    for child in filter_repo_children(workspace, target):
         kind = "dir" if child.is_dir() else "file"
         entries.append(f"{kind}\t{child.name}")
     hint = "(note: a '.git' entry inside a worktree is a pointer file, not a directory)"
@@ -345,12 +356,16 @@ def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
         return "ERROR: search path not found"
     if search_root.is_file() and is_binary_path(search_root):
         return "ERROR: grep not useful on binary files; use read_file"
+    if blocked := check_repo_path(workspace, search_root):
+        return blocked
     rg = shutil.which("rg")
     if rg:
         args = [rg, "--line-number", "--no-heading", "--color", "never",
                 "--max-count", str(GREP_MAX_MATCHES)]
         if glob:
             args += ["--glob", glob]
+        for secret_glob in _RG_SECRET_GLOBS:
+            args += ["--glob", secret_glob]
         args += [pattern, str(search_root)]
         try:
             proc = _silent_run(args, capture_output=True, text=True, timeout=60)
@@ -358,11 +373,26 @@ def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
         except (subprocess.TimeoutExpired, OSError) as exc:
             return f"ERROR: grep failed: {exc}"
     else:
-        out = _python_grep(search_root, pattern, glob)
-    return _cap_grep_output(out)
+        out = _python_grep(workspace, search_root, pattern, glob)
+    return _cap_grep_output(_filter_grep_output(workspace, out))
 
 
-def _python_grep(root: Path, pattern: str, glob: str | None) -> str:
+def _filter_grep_output(workspace: Path, out: str) -> str:
+    if not out or out in {"(no matches)", "(no output)"}:
+        return out
+    kept: list[str] = []
+    for line in out.splitlines():
+        colon = line.find(":")
+        if colon <= 0:
+            kept.append(line)
+            continue
+        file_path = Path(line[:colon])
+        if check_repo_path(workspace, file_path) is None:
+            kept.append(line)
+    return "\n".join(kept) if kept else "(no matches)"
+
+
+def _python_grep(workspace: Path, root: Path, pattern: str, glob: str | None) -> str:
     import re
     try:
         rx = re.compile(pattern)
@@ -372,6 +402,8 @@ def _python_grep(root: Path, pattern: str, glob: str | None) -> str:
     files = root.rglob(glob) if glob else root.rglob("*")
     for f in files:
         if not f.is_file():
+            continue
+        if check_repo_path(workspace, f) is not None:
             continue
         try:
             for i, line in enumerate(f.open("r", encoding="utf-8", errors="replace"), 1):
@@ -460,7 +492,7 @@ def _gather_tree(workspace: Path, root: Path) -> list[str]:
         if depth > GATHER_TREE_DEPTH or len(lines) >= GATHER_TREE_MAX:
             return
         try:
-            children = sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            children = filter_repo_children(workspace, base)
         except OSError:
             return
         for child in children:
@@ -483,6 +515,8 @@ def _gather_context(workspace: Path, path: str) -> str:
     target = _resolve(workspace, path)
     if not target.exists():
         return f"ERROR: path not found: {path}"
+    if blocked := check_repo_path(workspace, target):
+        return blocked
 
     sections: list[str] = [f"# Context bundle for {path}\n"]
 
@@ -497,10 +531,13 @@ def _gather_context(workspace: Path, path: str) -> str:
         docs_dir = target / "docs"
         if docs_dir.is_dir():
             for fp in sorted(docs_dir.rglob("*")):
-                if fp.is_file() and fp.suffix.lower() in {".md", ".txt", ".rst"}:
-                    doc_candidates.append(fp)
-                    if len(doc_candidates) >= 8:
-                        break
+                if not fp.is_file() or fp.suffix.lower() not in {".md", ".txt", ".rst"}:
+                    continue
+                if check_repo_path(workspace, fp) is not None:
+                    continue
+                doc_candidates.append(fp)
+                if len(doc_candidates) >= 8:
+                    break
 
     if doc_candidates:
         sections.append("## Documentation\n")
@@ -518,7 +555,7 @@ def _gather_context(workspace: Path, path: str) -> str:
     search_root = target if target.is_dir() else target.parent
     for name in manifest_names:
         fp = search_root / name
-        if fp.is_file():
+        if fp.is_file() and check_repo_path(workspace, fp) is None:
             manifests.append(f"### {fp.relative_to(workspace).as_posix()}\n{_excerpt_file(fp, 2000)}\n")
     if manifests:
         sections.append("## Stack manifests\n" + "\n".join(manifests))
@@ -527,7 +564,7 @@ def _gather_context(workspace: Path, path: str) -> str:
     api_files: list[str] = []
     if search_root.is_dir():
         for fp in sorted(search_root.rglob("*")):
-            if not fp.is_file():
+            if not fp.is_file() or check_repo_path(workspace, fp) is not None:
                 continue
             lower = fp.name.lower()
             if any(p in lower for p in api_patterns) and fp.suffix.lower() in {".yaml", ".yml", ".json", ".graphql", ".gql"}:

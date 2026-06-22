@@ -88,6 +88,8 @@ async def run_agent(
 
     turn = 0
     fetch_refunds = 0
+    wrote_analysis = False
+    wrote_tasks = False
 
     def on_token(tok: str) -> None:
         if on_event:
@@ -129,6 +131,21 @@ async def run_agent(
             append_activity(workspace, run_id, module_id, "thinking", turn=turn, text=content)
 
         if not tool_calls:
+            if not wrote_analysis or not wrote_tasks:
+                missing = []
+                if not wrote_analysis:
+                    missing.append("write_analysis")
+                if not wrote_tasks:
+                    missing.append("write_tasks")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You stopped without required module outputs. "
+                        f"Call {' and '.join(missing)} before finishing. "
+                        "Read templates/ first. Use tools — do not reply with text only."
+                    ),
+                })
+                continue
             final = content or f"{role} complete."
             append_eventlog(workspace, module_id, "SUCCESS", final.splitlines()[0][:160] if final else "")
             append_activity(workspace, run_id, module_id, "final", turn=turn, text=final)
@@ -170,6 +187,10 @@ async def run_agent(
                 module_id=module_id,
             )
             results.append(result)
+            if name == "write_analysis" and not result.startswith("ERROR:"):
+                wrote_analysis = True
+            if name == "write_tasks" and not result.startswith("ERROR:"):
+                wrote_tasks = True
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id") or name,

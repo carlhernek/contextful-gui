@@ -152,6 +152,7 @@ fn list_git_credential_hosts(app: AppHandle, id: String) -> CmdResult<Value> {
                 "host": h,
                 "configured": git_credentials::load(h).ok().flatten().is_some(),
                 "masked": git_credentials::masked(h).ok().flatten(),
+                "username": git_credentials::load_user(h).ok().flatten(),
             })
         })
         .collect();
@@ -159,9 +160,17 @@ fn list_git_credential_hosts(app: AppHandle, id: String) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-fn set_git_credential(app: AppHandle, host: String, token: String) -> CmdResult<()> {
+fn set_git_credential(
+    app: AppHandle,
+    host: String,
+    token: String,
+    username: Option<String>,
+) -> CmdResult<()> {
     let host = git_credentials::normalize_host(&host);
     git_credentials::save(&host, &token).map_err(err)?;
+    if let Some(user) = username {
+        git_credentials::save_user(&host, &user).map_err(err)?;
+    }
     let mut s = settings::load_settings(&app).unwrap_or_default();
     if !s.git_credential_hosts.iter().any(|h| h == &host) {
         s.git_credential_hosts.push(host);

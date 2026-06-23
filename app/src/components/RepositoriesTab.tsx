@@ -14,6 +14,7 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
   const [pullTarget, setPullTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [credHost, setCredHost] = useState("dev.azure.com");
+  const [credUsername, setCredUsername] = useState("");
   const [credToken, setCredToken] = useState("");
   const [credBusy, setCredBusy] = useState(false);
   const { busy: cloneBusy } = useJob("clone", projectId);
@@ -44,6 +45,11 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
+
+  useEffect(() => {
+    const current = credHosts.find((h) => h.host === credHost);
+    setCredUsername(current?.username ?? "");
+  }, [credHost, credHosts]);
 
   const add = async () => {
     if (!name.trim() || !url.trim()) return;
@@ -92,7 +98,11 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
     setCredBusy(true);
     setError(null);
     try {
-      await api.setGitCredential(host, token);
+      await api.setGitCredential(
+        host,
+        token,
+        credUsername.trim() || undefined,
+      );
       setCredToken("");
       await refresh();
     } catch (e) {
@@ -122,7 +132,7 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
         failed
           .map((f) =>
             f.kind === "auth"
-              ? `Authentication failed for HTTPS — add a Personal Access Token below (host: dev.azure.com for Azure DevOps). ${f.error ?? ""}`
+              ? `Authentication failed — re-save Git credentials for dev.azure.com (password from Generate Git Credentials + your Azure username). ${f.error ?? ""}`
               : f.error
           )
           .join("\n")
@@ -141,11 +151,11 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
       <h3 className="mb-2 font-semibold text-cf-ink">Git credentials (HTTPS)</h3>
       <div className="mb-4 rounded-md border border-cf-border bg-cf-surface-2 p-3">
         <p className="mb-2 text-xs text-cf-muted">
-          Tokens are stored in the OS keychain. For Azure DevOps, create a PAT with Code (read)
-          scope and save it for <span className="font-mono">dev.azure.com</span>. The PAT is the
-          password — the org name in the repo URL (e.g.{" "}
-          <span className="font-mono">https://Org@dev.azure.com/...</span>) is optional; leave URLs
-          as Azure provides them.
+          Tokens are stored in the OS keychain. For Azure DevOps, click <strong>Generate Git
+          Credentials</strong> on the clone page, then save the <strong>password</strong> below and
+          your Azure <strong>username</strong> (e.g. <span className="font-mono">carl.hernek</span>
+          ). The org name in repo URLs is separate — pull needs your personal username when Azure
+          generated the password.
         </p>
         {missingHosts.length > 0 && (
           <p className="mb-2 text-xs text-cf-danger">
@@ -168,9 +178,16 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
             ))}
           </datalist>
           <input
+            className="min-w-[8rem] rounded-md border border-cf-border bg-cf-surface px-2 py-1.5 font-mono text-sm text-cf-ink"
+            placeholder="Azure username"
+            value={credUsername}
+            onChange={(e) => setCredUsername(e.target.value)}
+            disabled={credBusy || repoBusy}
+          />
+          <input
             type="password"
             className="min-w-[12rem] flex-1 rounded-md border border-cf-border bg-cf-surface px-2 py-1.5 text-sm text-cf-ink"
-            placeholder="Personal Access Token"
+            placeholder="Password / PAT from Generate Git Credentials"
             value={credToken}
             onChange={(e) => setCredToken(e.target.value)}
             disabled={credBusy || repoBusy}
@@ -190,7 +207,8 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
               .filter((h) => h.configured)
               .map((h) => (
                 <span key={h.host} className="inline-flex items-center gap-1">
-                  {h.host}: {h.masked ?? "saved"}
+                  {h.host}
+                  {h.username ? ` (${h.username})` : ""}: {h.masked ?? "saved"}
                   <button
                     type="button"
                     className="text-cf-danger hover:underline"

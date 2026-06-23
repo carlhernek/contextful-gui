@@ -172,6 +172,34 @@ pub fn missing_pat_host(url: &str) -> Option<String> {
     Some(git_credentials::normalize_host(&host))
 }
 
+fn inject_https_user(url: &str, user: &str) -> String {
+    let Some((_, host_path)) = https_user_and_path(url) else {
+        return url.to_string();
+    };
+    format!("https://{user}@{host_path}")
+}
+
+/// Prefer embedded URL user; else meta URL user; else plain remote URL.
+pub fn resolve_git_auth_url(meta_url: &str, remote_url: &str) -> String {
+    if https_user_and_path(remote_url)
+        .map(|(u, _)| u.is_some())
+        .unwrap_or(false)
+    {
+        return remote_url.to_string();
+    }
+    if let Some((Some(user), _)) = https_user_and_path(meta_url) {
+        return inject_https_user(remote_url, &user);
+    }
+    remote_url.to_string()
+}
+
+fn git_https_username(host: &str, url: &str) -> Option<String> {
+    if let Some((Some(user), _)) = https_user_and_path(url) {
+        return Some(user);
+    }
+    git_credentials::load_user(host).ok().flatten()
+}
+
 fn append_git_auth(cmd: &mut Command, url: &str) {
     let Some(host) = git_host_from_url(url) else {
         return;
@@ -179,8 +207,7 @@ fn append_git_auth(cmd: &mut Command, url: &str) {
     let Ok(Some(pat)) = git_credentials::load(&host) else {
         return;
     };
-    let (user, _) = https_user_and_path(url).unwrap_or((None, String::new()));
-    let creds = match user {
+    let creds = match git_https_username(&host, url) {
         Some(u) => format!("{u}:{pat}"),
         None => format!(":{pat}"),
     };
@@ -631,7 +658,7 @@ pub fn git_batch_failure_message(results: &Value) -> String {
         .count();
     if auth > 0 {
         format!(
-            "{failed}/{} failed — add a Personal Access Token under Git credentials (e.g. dev.azure.com)",
+            "{failed}/{} failed — check Git credentials for dev.azure.com (PAT/password and Azure username, e.g. from Generate Git Credentials)",
             arr.len()
         )
     } else {
@@ -696,7 +723,8 @@ pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
         } else {
             repo.branch.clone()
         };
-        let auth_url = repo_remote_url(&dest).unwrap_or_else(|| repo.url.clone());
+        let remote_url = repo_remote_url(&dest).unwrap_or_else(|| repo.url.clone());
+        let auth_url = resolve_git_auth_url(&repo.url, &remote_url);
         let fetch_result = repo_git_run_authed(&["fetch", "origin", &branch], &dest, Some(&auth_url));
         match fetch_result {
             Ok(_) => {
@@ -1536,7 +1564,24 @@ mod tests {
             ]
         });
         assert!(git_batch_has_failures(&results));
-        assert!(git_batch_failure_message(&results).contains("Personal Access Token"));
+        assert!(git_batch_failure_message(&results).contains("username"));
+    }
+
+    #[test]
+    fn resolve_git_auth_url_injects_meta_user() {
+        let meta = "https://VikingAssistanceGroupAS@dev.azure.com/VikingAssistanceGroupAS/viking-assistance/_git/api";
+        let remote = "https://dev.azure.com/VikingAssistanceGroupAS/viking-assistance/_git/api/";
+        assert_eq!(
+            resolve_git_auth_url(meta, remote),
+            "https://VikingAssistanceGroupAS@dev.azure.com/VikingAssistanceGroupAS/viking-assistance/_git/api/"
+        );
+    }
+
+    #[test]
+    fn resolve_git_auth_url_keeps_remote_user() {
+        let meta = "https://dev.azure.com/org/_git/a";
+        let remote = "https://user@dev.azure.com/org/_git/a";
+        assert_eq!(resolve_git_auth_url(meta, remote), remote);
     }
 
     #[test]

@@ -49,6 +49,7 @@ export interface GitCredentialHost {
   host: string;
   configured: boolean;
   masked?: string | null;
+  username?: string | null;
 }
 
 export interface MetaEntry {
@@ -210,8 +211,8 @@ export const api = {
 
   listGitCredentialHosts: (id: string) =>
     invoke<{ hosts: GitCredentialHost[] }>("list_git_credential_hosts", { id }),
-  setGitCredential: (host: string, token: string) =>
-    invoke<void>("set_git_credential", { host, token }),
+  setGitCredential: (host: string, token: string, username?: string) =>
+    invoke<void>("set_git_credential", { host, token, username: username || null }),
   clearGitCredential: (host: string) => invoke<void>("clear_git_credential", { host }),
 
   getSettings: () => invoke<SetupStatus>("get_settings"),

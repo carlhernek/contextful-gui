@@ -6,15 +6,27 @@ export interface EventLogEntry {
   message: string;
 }
 
+export interface EventLogContext {
+  runId?: string;
+  appVersion?: string;
+  modulesVersion?: string;
+}
+
+export interface EventLogEntryWithContext extends EventLogEntry {
+  context: EventLogContext;
+}
+
 export interface LogFilterOptions {
   category?: LogFilter;
   from?: Date | null;
   to?: Date | null;
   appVersion?: string;
   modulesVersion?: string;
+  runId?: string;
 }
 
 const LINE_RE = /^\[([^\]]+)\]\s+(\S+)\s+(\S+)(?:\s+—\s+(.*))?$/;
+const RUN_ID_RE = /\brunId=([^\s)]+)/;
 
 export function parseEventLog(text: string): EventLogEntry[] {
   const out: EventLogEntry[] = [];
@@ -49,13 +61,62 @@ export function extractVersions(message: string): { app?: string; modules?: stri
   return out;
 }
 
-export function collectDistinctVersions(entries: EventLogEntry[]): {
+export function extractRunId(message: string): string | undefined {
+  return RUN_ID_RE.exec(message)?.[1];
+}
+
+/** Attach inferred runId / app / modules by carrying context forward through the log. */
+export function propagateLogContext(entries: EventLogEntry[]): EventLogEntryWithContext[] {
+  let runId: string | undefined;
+  let appVersion: string | undefined;
+  let modulesVersion: string | undefined;
+
+  return entries.map((entry) => {
+    const inline = extractVersions(entry.message);
+    const inlineRun = extractRunId(entry.message);
+
+    if (entry.scope === "run" && entry.status === "START") {
+      runId = inlineRun ?? runId;
+      if (inline.app) appVersion = inline.app;
+      if (inline.modules) modulesVersion = inline.modules;
+    } else if (inlineRun) {
+      runId = inlineRun;
+    }
+
+    if (entry.scope === "modules" && inline.modules) {
+      modulesVersion = inline.modules;
+    }
+
+    if (
+      entry.status === "START" &&
+      entry.scope !== "run" &&
+      entry.scope !== "job" &&
+      entry.scope !== "git"
+    ) {
+      if (inline.app) appVersion = inline.app;
+      if (inline.modules) modulesVersion = inline.modules;
+    }
+
+    return {
+      ...entry,
+      context: {
+        runId,
+        appVersion,
+        modulesVersion,
+      },
+    };
+  });
+}
+
+export function collectDistinctVersions(entries: EventLogEntryWithContext[]): {
   app: string[];
   modules: string[];
 } {
   const app = new Set<string>();
   const modules = new Set<string>();
   for (const e of entries) {
+    if (e.context.appVersion) app.add(e.context.appVersion);
+    if (e.context.modulesVersion) modules.add(e.context.modulesVersion);
     const v = extractVersions(e.message);
     if (v.app) app.add(v.app);
     if (v.modules) modules.add(v.modules);
@@ -66,41 +127,62 @@ export function collectDistinctVersions(entries: EventLogEntry[]): {
   };
 }
 
+export function collectDistinctRunIds(entries: EventLogEntryWithContext[]): string[] {
+  const ids = new Set<string>();
+  for (const e of entries) {
+    if (e.context.runId) ids.add(e.context.runId);
+  }
+  return [...ids].sort().reverse();
+}
+
+function endOfMinute(d: Date): Date {
+  return new Date(d.getTime() + 59_999);
+}
+
 export function filterByDateRange(
   entries: EventLogEntry[],
   from?: Date | null,
   to?: Date | null,
 ): EventLogEntry[] {
   if (!from && !to) return entries;
+  const toInclusive = to ? endOfMinute(to) : null;
   return entries.filter((e) => {
     const ts = parseEntryTimestamp(e);
     if (!ts) return true;
     if (from && ts < from) return false;
-    if (to && ts > to) return false;
+    if (toInclusive && ts > toInclusive) return false;
     return true;
   });
 }
 
 export function filterByVersion(
-  entries: EventLogEntry[],
+  entries: EventLogEntryWithContext[],
   appVersion?: string,
   modulesVersion?: string,
-): EventLogEntry[] {
+): EventLogEntryWithContext[] {
   if (!appVersion && !modulesVersion) return entries;
   return entries.filter((e) => {
-    const v = extractVersions(e.message);
-    if (appVersion && v.app !== appVersion) return false;
-    if (modulesVersion && v.modules !== modulesVersion) return false;
+    if (appVersion && e.context.appVersion !== appVersion) return false;
+    if (modulesVersion && e.context.modulesVersion !== modulesVersion) return false;
     return true;
   });
 }
 
+export function filterByRunId(
+  entries: EventLogEntryWithContext[],
+  runId?: string,
+): EventLogEntryWithContext[] {
+  if (!runId) return entries;
+  return entries.filter((e) => e.context.runId === runId);
+}
+
 export function applyLogFilters(
-  entries: EventLogEntry[],
+  entries: EventLogEntryWithContext[],
   options: LogFilterOptions,
-): EventLogEntry[] {
-  let out = filterByDateRange(entries, options.from, options.to);
+): EventLogEntryWithContext[] {
+  let out: EventLogEntryWithContext[] = filterByDateRange(entries, options.from, options.to);
   out = filterByVersion(out, options.appVersion, options.modulesVersion);
+  out = filterByRunId(out, options.runId);
   if (options.category && options.category !== "ALL") {
     out = filterEntries(out, options.category);
   }
@@ -135,12 +217,22 @@ const INDEX_STATUSES = new Set([
   "FORCE_REINDEX",
 ]);
 
-export function filterEntries(entries: EventLogEntry[], filter: LogFilter): EventLogEntry[] {
+function isModuleScope(scope: string): boolean {
+  return scope !== "" && !OPS_SCOPES.has(scope);
+}
+
+export function filterEntries(
+  entries: EventLogEntryWithContext[],
+  filter: LogFilter,
+): EventLogEntryWithContext[] {
   if (filter === "ALL") return entries;
   return entries.filter((e) => {
     switch (filter) {
       case "Ops":
-        return OPS_STATUSES.has(e.status) || OPS_SCOPES.has(e.scope);
+        return (
+          OPS_SCOPES.has(e.scope) ||
+          (OPS_STATUSES.has(e.status) && !isModuleScope(e.scope))
+        );
       case "TURN":
         return e.status === "TURN";
       case "ERROR":
@@ -160,7 +252,7 @@ export function filterEntries(entries: EventLogEntry[], filter: LogFilter): Even
 }
 
 /** Keep only the last N parsed lines for snappy UI rendering. */
-export function tailEventLog(entries: EventLogEntry[], maxLines = 2000): EventLogEntry[] {
+export function tailEventLog<T extends EventLogEntry>(entries: T[], maxLines = 2000): T[] {
   if (entries.length <= maxLines) return entries;
   return entries.slice(-maxLines);
 }

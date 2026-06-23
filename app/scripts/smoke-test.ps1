@@ -24,6 +24,14 @@ Step "Frontend build" {
     return ($code -eq 0)
 }
 
+Step "Frontend unit tests" {
+    Push-Location $App
+    npm run test 2>&1 | Out-Host
+    $code = $LASTEXITCODE
+    Pop-Location
+    return ($code -eq 0)
+}
+
 Step "Rust compile" {
     Push-Location "$App\src-tauri"
     cargo check --quiet | Out-Host

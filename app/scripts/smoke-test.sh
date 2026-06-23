@@ -12,6 +12,7 @@ step() {
 }
 
 step "Frontend build"    bash -c "cd \"$APP\" && npm run build"
+step "Frontend unit tests" bash -c "cd \"$APP\" && npm run test"
 step "Rust compile"      bash -c "cd \"$APP/src-tauri\" && cargo check --quiet"
 step "Sidecar smoke"     bash -c "cd \"$APP/sidecar\" && uv run python tests/smoke.py"
 step "Rust workspace tests" bash -c "cd \"$APP/src-tauri\" && cargo test --quiet"

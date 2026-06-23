@@ -1,7 +1,7 @@
 {
   "name": "contextful",
   "private": true,
-  "version": "1.2.20",
+  "version": "1.2.21",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,7 @@
     "build:sidecar": "cd sidecar && uv run python build.py",
     "build:all": "npm run build:sidecar && npm run tauri build",
     "smoke": "powershell -ExecutionPolicy Bypass -File scripts/smoke-test.ps1",
+    "test": "vitest run",
     "release-gate": "powershell -ExecutionPolicy Bypass -File scripts/release-gate.ps1",
     "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
   },
@@ -33,6 +34,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "tailwindcss": "^4.3.0",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^3.2.4"
   }
 }

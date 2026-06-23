@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type GitCredentialHost, type RepoStatus } from "../lib/ipc";
+import { missingPatHosts } from "../lib/gitRepoAuth";
 import { useJob } from "../lib/jobs";
 import { IndexButton } from "./IndexButton";
 import { Spinner } from "./Spinner";
@@ -19,6 +20,16 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
   const { busy: pullBusy } = useJob("pull", projectId);
   const { isBusy } = useJob(undefined, projectId);
   const repoBusy = cloneBusy || pullBusy || isBusy;
+
+  const missingHosts = useMemo(
+    () =>
+      missingPatHosts(
+        repos,
+        credHosts.filter((h) => h.configured).map((h) => h.host),
+      ),
+    [repos, credHosts],
+  );
+  const cloneBlocked = missingHosts.length > 0;
 
   const refresh = async () => {
     setRepos(await api.listRepos(projectId));
@@ -131,8 +142,17 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
       <div className="mb-4 rounded-md border border-cf-border bg-cf-surface-2 p-3">
         <p className="mb-2 text-xs text-cf-muted">
           Tokens are stored in the OS keychain. For Azure DevOps, create a PAT with Code (read)
-          scope and save it for <span className="font-mono">dev.azure.com</span>.
+          scope and save it for <span className="font-mono">dev.azure.com</span>. The PAT is the
+          password — the org name in the repo URL (e.g.{" "}
+          <span className="font-mono">https://Org@dev.azure.com/...</span>) is optional; leave URLs
+          as Azure provides them.
         </p>
+        {missingHosts.length > 0 && (
+          <p className="mb-2 text-xs text-cf-danger">
+            No token saved for: {missingHosts.join(", ")} — clone will fail until you save a PAT
+            for each host.
+          </p>
+        )}
         <div className="mb-2 flex flex-wrap gap-2">
           <input
             className="min-w-[10rem] rounded-md border border-cf-border bg-cf-surface px-2 py-1.5 font-mono text-sm text-cf-ink"
@@ -265,7 +285,12 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
             type="button"
             className="flex items-center gap-2 rounded-md bg-cf-accent px-3 py-1.5 text-sm font-medium text-cf-accent-ink hover:opacity-90 disabled:opacity-40"
             onClick={() => void runClone()}
-            disabled={repoBusy}
+            disabled={repoBusy || cloneBlocked}
+            title={
+              cloneBlocked
+                ? `Save a PAT for ${missingHosts.join(", ")} before cloning`
+                : undefined
+            }
           >
             {cloneBusy && <Spinner size={12} />} Clone all
           </button>

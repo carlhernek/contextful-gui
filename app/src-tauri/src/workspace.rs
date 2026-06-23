@@ -120,28 +120,56 @@ fn https_user_and_path(url: &str) -> Option<(Option<String>, String)> {
     }
 }
 
+#[allow(dead_code)] // URL-embed fallback; exercised in unit tests
+fn encode_userinfo(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
 fn authenticated_https_url(url: &str, pat: &str) -> String {
     let Some((user, host_path)) = https_user_and_path(url) else {
         return url.to_string();
     };
+    let enc_pat = encode_userinfo(pat);
     match user {
-        Some(u) => format!("https://{u}:{pat}@{host_path}"),
-        None => format!("https://:{pat}@{host_path}"),
+        Some(u) => format!("https://{}:{}@{host_path}", encode_userinfo(&u), enc_pat),
+        None => format!("https://:{enc_pat}@{host_path}"),
     }
 }
 
-fn authenticated_clone_url(url: &str) -> String {
-    let Some(host) = git_host_from_url(url) else {
-        return url.to_string();
-    };
-    let Ok(Some(pat)) = git_credentials::load(&host) else {
-        return url.to_string();
-    };
-    if url.starts_with("https://") || url.starts_with("http://") {
-        authenticated_https_url(url, &pat)
-    } else {
-        url.to_string()
+/// HTTPS remotes that typically require a stored PAT (Azure DevOps, embedded username URLs).
+pub fn https_repo_needs_pat(url: &str) -> bool {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return false;
     }
+    if url.contains('@') {
+        return true;
+    }
+    git_host_from_url(url).is_some_and(|h| {
+        let h = h.to_lowercase();
+        h == "dev.azure.com" || h.ends_with(".visualstudio.com")
+    })
+}
+
+pub fn missing_pat_host(url: &str) -> Option<String> {
+    if !https_repo_needs_pat(url) {
+        return None;
+    }
+    let host = git_host_from_url(url)?;
+    if git_credentials::load(&host).ok().flatten().is_some() {
+        return None;
+    }
+    Some(git_credentials::normalize_host(&host))
 }
 
 fn append_git_auth(cmd: &mut Command, url: &str) {
@@ -471,6 +499,24 @@ pub fn clone_repos(install: &Path, id: &str) -> Result<Value> {
             results.push(json!({"name": repo.name, "ok": true, "status": "already cloned"}));
             continue;
         }
+        if let Some(host) = missing_pat_host(&repo.url) {
+            let msg = format!(
+                "No Personal Access Token saved for {host} — add one under Git credentials"
+            );
+            append_eventlog(
+                &project,
+                "git",
+                "WARN",
+                &format!("{} skipped — {msg}", repo.name),
+            );
+            results.push(json!({
+                "name": repo.name,
+                "ok": false,
+                "error": msg,
+                "kind": "auth",
+            }));
+            continue;
+        }
         match clone_one(&repo.url, &repo.branch, &dest) {
             Ok(()) => {
                 let _ = harden_readonly_repo(&dest);
@@ -518,25 +564,27 @@ fn repo_remote_url(repo_dir: &Path) -> Option<String> {
 }
 
 fn clone_one(url: &str, branch: &str, dest: &Path) -> Result<()> {
-    let auth_url = authenticated_clone_url(url);
     let cwd = dest.parent().unwrap_or(Path::new("."));
-    repo_git_run(
+    let dest_str = dest.to_str().context("dest path")?;
+    repo_git_run_authed(
         &[
             "clone",
             "--depth",
             "1",
             "--branch",
             branch,
-            &auth_url,
-            dest.to_str().context("dest path")?,
+            url,
+            dest_str,
         ],
         cwd,
+        Some(url),
     )
     .map(|_| ())
     .or_else(|_| {
-        repo_git_run(
-            &["clone", "--depth", "1", &auth_url, dest.to_str().unwrap()],
+        repo_git_run_authed(
+            &["clone", "--depth", "1", url, dest_str],
             cwd,
+            Some(url),
         )
         .map(|_| ())
     })
@@ -1448,6 +1496,35 @@ mod tests {
         let url = "https://user@dev.azure.com/org/_git/repo";
         let out = authenticated_https_url(url, "pat123");
         assert_eq!(out, "https://user:pat123@dev.azure.com/org/_git/repo");
+    }
+
+    #[test]
+    fn authenticated_https_url_encodes_special_chars_in_pat() {
+        let url = "https://user@dev.azure.com/org/_git/repo";
+        let out = authenticated_https_url(url, "pat@special");
+        assert_eq!(out, "https://user:pat%40special@dev.azure.com/org/_git/repo");
+    }
+
+    #[test]
+    fn https_repo_needs_pat_for_azure_and_embedded_user() {
+        assert!(https_repo_needs_pat(
+            "https://dev.azure.com/org/project/_git/repo"
+        ));
+        assert!(https_repo_needs_pat(
+            "https://Org@dev.azure.com/x/_git/y"
+        ));
+        assert!(!https_repo_needs_pat("https://github.com/org/repo.git"));
+    }
+
+    #[test]
+    fn git_batch_has_failures_on_partial_clone() {
+        let results = json!({
+            "results": [
+                {"ok": false, "kind": "auth"},
+                {"ok": true},
+            ]
+        });
+        assert!(git_batch_has_failures(&results));
     }
 
     #[test]

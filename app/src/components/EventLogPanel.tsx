@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, onContextfulEvent } from "../lib/ipc";
 import {
   parseEventLog,
+  propagateLogContext,
   applyLogFilters,
   collectDistinctVersions,
+  collectDistinctRunIds,
   tailEventLog,
   type LogFilter,
 } from "../lib/eventLog";
@@ -32,6 +34,7 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
   const [toLocal, setToLocal] = useState("");
   const [appVersion, setAppVersion] = useState("");
   const [modulesVersion, setModulesVersion] = useState("");
+  const [runId, setRunId] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -62,21 +65,26 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
     };
   }, [refresh]);
 
-  const parsed = useMemo(() => parseEventLog(text), [text]);
-  const versions = useMemo(() => collectDistinctVersions(parsed), [parsed]);
+  const contextual = useMemo(() => propagateLogContext(parseEventLog(text)), [text]);
+  const versions = useMemo(() => collectDistinctVersions(contextual), [contextual]);
+  const runIds = useMemo(() => collectDistinctRunIds(contextual), [contextual]);
 
-  const entries = useMemo(() => {
-    const filtered = applyLogFilters(parsed, {
+  const { entries, filteredCount } = useMemo(() => {
+    const filtered = applyLogFilters(contextual, {
       category: filter,
       from: fromDatetimeLocal(fromLocal),
       to: fromDatetimeLocal(toLocal),
       appVersion: appVersion || undefined,
       modulesVersion: modulesVersion || undefined,
+      runId: runId || undefined,
     });
-    return tailEventLog(filtered, TAIL_LINES);
-  }, [parsed, filter, fromLocal, toLocal, appVersion, modulesVersion]);
+    return {
+      entries: tailEventLog(filtered, TAIL_LINES),
+      filteredCount: filtered.length,
+    };
+  }, [contextual, filter, fromLocal, toLocal, appVersion, modulesVersion, runId]);
 
-  const truncated = parsed.length > TAIL_LINES;
+  const tailTruncated = filteredCount > TAIL_LINES;
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -180,6 +188,21 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
             Clear
           </button>
           <label className="text-cf-muted">
+            Run
+            <select
+              className="ml-1 max-w-[11rem] rounded border border-cf-border bg-cf-surface-2 px-1 py-0.5 font-mono text-cf-ink"
+              value={runId}
+              onChange={(e) => setRunId(e.target.value)}
+            >
+              <option value="">Any</option>
+              {runIds.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-cf-muted">
             App
             <select
               className="ml-1 rounded border border-cf-border bg-cf-surface-2 px-1 py-0.5 text-cf-ink"
@@ -212,8 +235,9 @@ export function EventLogPanel({ projectId }: { projectId: string }) {
         </div>
       </div>
       <div className="border-b border-cf-border px-3 py-1 text-[10px] text-cf-muted">
-        Showing {entries.length} of {parsed.length} lines
-        {truncated ? ` (tail cap ${TAIL_LINES} before filters)` : ""}
+        Showing {entries.length} of {contextual.length} lines
+        {filteredCount < contextual.length ? ` (${filteredCount} after filters)` : ""}
+        {tailTruncated ? ` · tail capped at ${TAIL_LINES}` : ""}
       </div>
       <div
         ref={scrollRef}

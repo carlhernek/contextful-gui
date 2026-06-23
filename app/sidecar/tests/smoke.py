@@ -79,6 +79,7 @@ def _make_workspace(root: Path) -> Path:
 
 
 def test_tools(ws: Path) -> None:
+    tools.set_run_context(ws, "r1")
     check("write_file then read_file round-trips",
           "wrote" in tools.execute_tool(ws, "write_file",
                                         {"path": "runs/r1/m/analysis.md", "content": "hi"})

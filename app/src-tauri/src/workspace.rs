@@ -1582,12 +1582,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_git_auth_url_injects_meta_user() {
-        let meta = "https://VikingAssistanceGroupAS@dev.azure.com/VikingAssistanceGroupAS/viking-assistance/_git/api";
-        let remote = "https://dev.azure.com/VikingAssistanceGroupAS/viking-assistance/_git/api/";
+    fn resolve_git_auth_url_injects_meta_user_when_no_stored_user() {
+        let meta = "https://VikingAssistanceGroupAS@git.example.com/org/_git/api";
+        let remote = "https://git.example.com/org/_git/api/";
         assert_eq!(
             resolve_git_auth_url(meta, remote),
-            "https://VikingAssistanceGroupAS@dev.azure.com/VikingAssistanceGroupAS/viking-assistance/_git/api/"
+            "https://VikingAssistanceGroupAS@git.example.com/org/_git/api/"
         );
     }
 

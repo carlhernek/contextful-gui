@@ -117,12 +117,23 @@ export interface TasksDoc {
   tasks: Task[];
 }
 
+export interface ToolSkip {
+  name: string;
+  args?: Record<string, unknown>;
+  attempts: number;
+  reason: string;
+  durationMs?: number;
+  ts?: string;
+}
+
 export interface ModuleArtifact {
   moduleId: string;
   hasAnalysis: boolean;
   hasActivity?: boolean;
   analysis?: string | null;
   tasks: TasksDoc | null;
+  skips?: ToolSkip[];
+  skipCount?: number;
 }
 
 export interface ActivityEntry {
@@ -147,6 +158,10 @@ export interface ActivityEntry {
   toolCallCount?: number;
   contentLength?: number;
   itemCount?: number;
+  attempt?: number;
+  maxAttempts?: number;
+  attempts?: number;
+  reason?: string;
 }
 
 export interface RunActivity {

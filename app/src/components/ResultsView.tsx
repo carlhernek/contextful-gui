@@ -132,6 +132,11 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
             onClick={() => setActive(m.moduleId)}
           >
             {m.moduleId}
+            {(m.skipCount ?? 0) > 0 && (
+              <span className="ml-1 text-cf-warn" title="tool_runner skips">
+                ⚠ {m.skipCount}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -169,6 +174,23 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
       </div>
 
       <div className="min-w-0 flex-1 overflow-auto p-4">
+        {(current?.skipCount ?? 0) > 0 && current?.skips && (
+          <div className="mb-4 rounded-md border border-cf-warn/40 bg-cf-warn/10 px-3 py-2 text-sm">
+            <p className="font-medium text-cf-warn">
+              tool_runner skip — {current.skipCount} tool call
+              {current.skipCount === 1 ? "" : "s"} skipped (run continued)
+            </p>
+            <ul className="mt-2 list-inside list-disc text-xs text-cf-muted">
+              {current.skips.map((sk, i) => (
+                <li key={`${sk.name}-${i}`}>
+                  <span className="font-mono">{sk.name}</span>
+                  {sk.attempts ? ` after ${sk.attempts} attempts` : ""}
+                  {sk.reason ? ` — ${sk.reason.slice(0, 120)}` : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {tab === "analysis" ? (
           loading && !analysis ? (
             <Spinner />

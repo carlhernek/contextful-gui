@@ -46,8 +46,10 @@ def _build_system_prompt(*, role, module_id, workspace, repo_paths, meta_docs,
         f"{metas}\n\n"
         "You have these tools: read_file, list_directory, write_file, append_eventlog, "
         "write_analysis, write_tasks, grep_repo, run_script, web_search, web_fetch, gather_context.\n"
-        "You may ONLY write under runs/<runId>/, research/, and the .eventlog. Use grep_repo "
-        "for code search instead of reading whole large files."
+        "You may ONLY write under runs/<runId>/, research/, and the .eventlog. "
+        "Start with gather_context per repo; scope grep_repo to source files; "
+        "use read_file start_line/end_line for large files.\n"
+        "The run ends automatically after write_analysis and write_tasks succeed — do not keep exploring."
     )
     return compose_module_prompt(workspace, runtime_ctx, skill_text)
 
@@ -196,6 +198,15 @@ async def run_agent(
                 "tool_call_id": call.get("id") or name,
                 "content": result,
             })
+
+        if wrote_analysis and wrote_tasks:
+            final = content.strip() or f"{role} complete."
+            append_eventlog(
+                workspace, module_id, "SUCCESS",
+                final.splitlines()[0][:160] if final else "",
+            )
+            append_activity(workspace, run_id, module_id, "final", turn=turn, text=final)
+            return final
 
         if _turn_was_only_failed_fetch(tool_calls, results) and fetch_refunds < MAX_FETCH_REFUNDS:
             fetch_refunds += 1

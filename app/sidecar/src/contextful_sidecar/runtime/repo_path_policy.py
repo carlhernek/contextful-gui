@@ -38,6 +38,14 @@ _SECRET_SUFFIXES = (
     ".der",
 )
 _SECRET_DIR_SEGMENTS = frozenset({".ssh"})
+_SKIP_REPO_SEGMENTS = frozenset({".git"})
+
+# Per-tool-call memo: (repo_root_posix, rel_posix) -> ignored bool | None
+_ignore_cache: dict[tuple[str, str], bool | None] = {}
+
+
+def clear_ignore_cache() -> None:
+    _ignore_cache.clear()
 
 
 def _silent_run(*popenargs, **kwargs) -> subprocess.CompletedProcess:
@@ -68,6 +76,10 @@ def repo_location(workspace: Path, target: Path) -> tuple[Path, Path] | None:
     return repo_root, inner
 
 
+def is_under_git_dir(rel_in_repo: Path) -> bool:
+    return ".git" in rel_in_repo.parts
+
+
 def is_sensitive_repo_path(rel_in_repo: Path) -> bool:
     name = rel_in_repo.name
     if not name and rel_in_repo == Path("."):
@@ -87,8 +99,15 @@ def is_sensitive_repo_path(rel_in_repo: Path) -> bool:
 
 def _git_check_ignore(repo_root: Path, rel_in_repo: Path) -> bool | None:
     """Return True if ignored, False if not, None if git unavailable."""
+    if is_under_git_dir(rel_in_repo):
+        return True
+    cache_key = (repo_root.resolve().as_posix(), rel_in_repo.as_posix())
+    if cache_key in _ignore_cache:
+        return _ignore_cache[cache_key]
+
     git_marker = repo_root / ".git"
     if not git_marker.exists():
+        _ignore_cache[cache_key] = None
         return None
     rel_str = rel_in_repo.as_posix() if rel_in_repo != Path(".") else "."
     try:
@@ -100,9 +119,64 @@ def _git_check_ignore(repo_root: Path, rel_in_repo: Path) -> bool | None:
             timeout=10,
             env=_git_env(),
         )
-        return proc.returncode == 0
+        result: bool | None = proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
-        return None
+        result = None
+    _ignore_cache[cache_key] = result
+    return result
+
+
+def batch_git_check_ignore(repo_root: Path, rel_paths: list[Path]) -> dict[Path, bool]:
+    """Classify paths as ignored in one git subprocess when possible."""
+    out: dict[Path, bool] = {}
+    to_check: list[Path] = []
+    for rel in rel_paths:
+        if is_under_git_dir(rel):
+            out[rel] = True
+            continue
+        cache_key = (repo_root.resolve().as_posix(), rel.as_posix())
+        if cache_key in _ignore_cache and _ignore_cache[cache_key] is not None:
+            out[rel] = bool(_ignore_cache[cache_key])
+            continue
+        to_check.append(rel)
+
+    if not to_check:
+        return out
+
+    git_marker = repo_root / ".git"
+    if not git_marker.exists():
+        patterns = _read_gitignore_patterns(repo_root)
+        for rel in to_check:
+            ignored = _simple_gitignore_match(rel, patterns)
+            cache_key = (repo_root.resolve().as_posix(), rel.as_posix())
+            _ignore_cache[cache_key] = ignored
+            out[rel] = ignored
+        return out
+
+    rel_strs = [r.as_posix() if r != Path(".") else "." for r in to_check]
+    try:
+        proc = _silent_run(
+            ["git", "check-ignore", "--stdin"],
+            cwd=repo_root,
+            input="\n".join(rel_strs),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_git_env(),
+        )
+        ignored_set = {line.strip() for line in (proc.stdout or "").splitlines() if line.strip()}
+        for rel, rel_str in zip(to_check, rel_strs, strict=True):
+            ignored = rel_str in ignored_set
+            cache_key = (repo_root.resolve().as_posix(), rel.as_posix())
+            _ignore_cache[cache_key] = ignored
+            out[rel] = ignored
+    except (OSError, subprocess.SubprocessError):
+        for rel in to_check:
+            checked = _git_check_ignore(repo_root, rel)
+            out[rel] = bool(checked) if checked is not None else _simple_gitignore_match(
+                rel, _read_gitignore_patterns(repo_root)
+            )
+    return out
 
 
 def _read_gitignore_patterns(repo_root: Path) -> list[str]:
@@ -146,6 +220,8 @@ def _simple_gitignore_match(rel_in_repo: Path, patterns: list[str]) -> bool:
 def is_gitignored_repo_path(repo_root: Path, rel_in_repo: Path) -> bool:
     if rel_in_repo == Path("."):
         return False
+    if is_under_git_dir(rel_in_repo):
+        return True
     checked = _git_check_ignore(repo_root, rel_in_repo)
     if checked is not None:
         return checked
@@ -161,6 +237,8 @@ def check_repo_path(workspace: Path, target: Path) -> str | None:
     if loc is None:
         return None
     repo_root, rel_in_repo = loc
+    if is_under_git_dir(rel_in_repo):
+        return "ERROR: path blocked (.git metadata — never exposed to agents)"
     if is_sensitive_repo_path(rel_in_repo):
         return "ERROR: path blocked (sensitive file — never exposed to agents)"
     if is_gitignored_repo_path(repo_root, rel_in_repo):
@@ -176,4 +254,7 @@ def filter_repo_children(workspace: Path, directory: Path) -> list[Path]:
         return []
     if repo_location(workspace, directory) is None:
         return children
-    return [c for c in children if check_repo_path(workspace, c) is None]
+    return [
+        c for c in children
+        if c.name not in _SKIP_REPO_SEGMENTS and check_repo_path(workspace, c) is None
+    ]

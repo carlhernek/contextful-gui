@@ -8,6 +8,7 @@ from pathlib import Path
 BINARY_EXTENSIONS = {
     ".docx", ".doc", ".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".webp",
     ".xlsx", ".xls", ".pptx", ".ppt", ".bin", ".exe", ".dll",
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
 }
 DOCX_EXTENSIONS = {".docx", ".doc"}
 SNIPPET_CAP = 500

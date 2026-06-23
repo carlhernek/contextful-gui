@@ -12,7 +12,7 @@ from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.indexing import agentic_reindex
 from contextful_sidecar.runtime.module_config import get_max_turns
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
-from contextful_sidecar.runtime.step_log import log_step
+from contextful_sidecar.runtime.tool_skips import read_skips
 
 EventCallback = Callable[[str, Any], None]
 CancelCheck = Callable[[], bool]
@@ -401,7 +401,16 @@ def _write_run_summary(ws: Path, run_id: str, completed: list[str], project_type
     ]
     for module_id in completed:
         lines.append(f"### {module_id}")
-        lines.append(f"- Status: SUCCESS. See `runs/{run_id}/{module_id}/analysis.md`.")
+        skips = read_skips(ws, run_id, module_id)
+        skip_note = f" Tool skips: {len(skips)}." if skips else ""
+        lines.append(
+            f"- Status: SUCCESS. See `runs/{run_id}/{module_id}/analysis.md`.{skip_note}"
+        )
+        if skips:
+            for sk in skips[:10]:
+                lines.append(
+                    f"  - skipped `{sk.get('name', '?')}` after {sk.get('attempts', '?')} attempts"
+                )
         lines.append("")
     try:
         (_run_dir(ws, run_id) / "run-summary.md").write_text("\n".join(lines), encoding="utf-8")

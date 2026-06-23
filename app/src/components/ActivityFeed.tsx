@@ -135,6 +135,30 @@ function FeedEntry({ entry }: { entry: ActivityEntry }) {
           </pre>
         </details>
       );
+    case "tool_retry":
+      return (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+          <span className="font-mono text-xs uppercase tracking-wide">tool retry</span>
+          <span className="ml-2 font-mono">{entry.name}</span>
+          {entry.attempt != null && entry.maxAttempts != null && (
+            <span className="ml-2 text-xs text-cf-muted">
+              attempt {entry.attempt}/{entry.maxAttempts}
+            </span>
+          )}
+          {entry.reason && <p className="mt-1 text-xs text-cf-muted">{entry.reason}</p>}
+        </div>
+      );
+    case "tool_skip":
+      return (
+        <div className="rounded-md border border-cf-warn/50 bg-cf-warn/10 px-3 py-2 text-sm text-cf-warn">
+          <span className="font-mono text-xs uppercase tracking-wide">tool_runner skip</span>
+          <span className="ml-2 font-mono">{entry.name}</span>
+          {entry.attempts != null && (
+            <span className="ml-2 text-xs text-cf-muted">after {entry.attempts} attempts</span>
+          )}
+          {entry.reason && <p className="mt-1 break-all text-xs">{entry.reason}</p>}
+        </div>
+      );
     case "item":
       return (
         <div className="text-sm text-cf-muted">

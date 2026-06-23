@@ -187,6 +187,12 @@ pub fn resolve_git_auth_url(meta_url: &str, remote_url: &str) -> String {
     {
         return remote_url.to_string();
     }
+    // Stored Azure username (Generate Git Credentials) beats org prefix in meta URL.
+    if let Some(host) = git_host_from_url(remote_url) {
+        if let Ok(Some(user)) = git_credentials::load_user(&host) {
+            return inject_https_user(remote_url, &user);
+        }
+    }
     if let Some((Some(user), _)) = https_user_and_path(meta_url) {
         return inject_https_user(remote_url, &user);
     }
@@ -194,10 +200,10 @@ pub fn resolve_git_auth_url(meta_url: &str, remote_url: &str) -> String {
 }
 
 fn git_https_username(host: &str, url: &str) -> Option<String> {
-    if let Some((Some(user), _)) = https_user_and_path(url) {
+    if let Ok(Some(user)) = git_credentials::load_user(host) {
         return Some(user);
     }
-    git_credentials::load_user(host).ok().flatten()
+    https_user_and_path(url).and_then(|(user, _)| user)
 }
 
 fn append_git_auth(cmd: &mut Command, url: &str) {
@@ -1343,12 +1349,20 @@ pub fn get_run_artifacts(install: &Path, id: &str, run_id: &str) -> Value {
                 .ok()
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok());
             let has_activity = e.path().join("activity.jsonl").exists();
+            let skips_path = e.path().join("skips.json");
+            let skips: Value = fs::read_to_string(&skips_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .unwrap_or_else(|| json!([]));
+            let skip_count = skips.as_array().map(|a| a.len()).unwrap_or(0);
             modules.push(json!({
                 "moduleId": mid,
                 "hasAnalysis": has_analysis,
                 "hasActivity": has_activity,
                 "analysis": analysis,
                 "tasks": tasks,
+                "skips": skips,
+                "skipCount": skip_count,
             }));
         }
     }
@@ -1911,5 +1925,23 @@ mod tests {
         let modules = out["modules"].as_array().unwrap();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0]["hasActivity"], true);
+    }
+
+    #[test]
+    fn get_run_artifacts_includes_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        init_workspace_dirs(&project).unwrap();
+        let mod_dir = project.join("runs/run-1/mod-a");
+        fs::create_dir_all(&mod_dir).unwrap();
+        fs::write(
+            mod_dir.join("skips.json"),
+            r#"[{"name":"gather_context","attempts":3,"reason":"timeout"}]"#,
+        )
+        .unwrap();
+        let out = get_run_artifacts(install, "p1", "run-1");
+        let modules = out["modules"].as_array().unwrap();
+        assert_eq!(modules[0]["skipCount"], 1);
     }
 }

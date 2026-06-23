@@ -8,13 +8,21 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import certifi
 import httpx
 
 from contextful_sidecar.runtime.file_text import is_binary_path, read_file_as_text, read_text_snippet
 from contextful_sidecar.runtime.eventlog import append_eventlog
-from contextful_sidecar.runtime.repo_path_policy import check_repo_path, filter_repo_children
+from contextful_sidecar.runtime.repo_path_policy import (
+    check_repo_path,
+    clear_ignore_cache,
+    filter_repo_children,
+)
+from contextful_sidecar.runtime.repo_walk import SKIP_DIR_NAMES, bounded_walk
+from contextful_sidecar.runtime.ssrf_guard import validate_fetch_url
+from contextful_sidecar.runtime.write_policy import check_write_allowed
 
 READ_FILE_CAP = 500_000          # 500KB cap for read_file
 WEB_FETCH_CAP = 100_000          # 100k chars for web_fetch
@@ -33,6 +41,13 @@ _RG_SECRET_GLOBS = (
     "!*.pem", "!*.key", "!*.p12", "!*.pfx", "!*.jks", "!*.keystore",
     "!id_rsa", "!id_dsa", "!id_ecdsa", "!id_ed25519",
     "!**/.ssh/**",
+)
+
+# Skip lockfiles, fonts, and other paths that waste agent turns on false positives.
+_RG_NOISE_GLOBS = (
+    "!package-lock.json", "!pnpm-lock.yaml", "!yarn.lock", "!composer.lock",
+    "!**/*.ttf", "!**/*.otf", "!**/*.woff", "!**/*.woff2", "!**/*.eot",
+    "!**/assets/fonts/**",
 )
 
 PROVENANCE_HEADER = (
@@ -92,10 +107,17 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a UTF-8 text file within the workspace (500KB cap).",
+            "description": (
+                "Read a UTF-8 text file within the workspace (500KB cap). "
+                "Use start_line/end_line (1-based, inclusive) to read a slice of large files."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer", "description": "First line to read (1-based)"},
+                    "end_line": {"type": "integer", "description": "Last line to read (1-based, inclusive)"},
+                },
                 "required": ["path"],
             },
         },
@@ -286,7 +308,12 @@ def set_run_context(workspace: Path, run_id: str) -> None:
 
 
 # --- individual tools -----------------------------------------------------
-def _read_file(workspace: Path, path: str) -> str:
+def _read_file(
+    workspace: Path,
+    path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
     target = _resolve(workspace, path)
     if target.is_dir():
         return f"ERROR: '{path}' is a directory; use list_directory"
@@ -294,7 +321,23 @@ def _read_file(workspace: Path, path: str) -> str:
         return "ERROR: file not found"
     if blocked := check_repo_path(workspace, target):
         return blocked
-    return read_file_as_text(target, cap=READ_FILE_CAP)
+    text = read_file_as_text(target, cap=READ_FILE_CAP)
+    if text.startswith("ERROR:") or text.startswith("binary file"):
+        return text
+    if start_line is not None or end_line is not None:
+        lines = text.splitlines()
+        if not lines:
+            return "(empty file)"
+        first = max(1, int(start_line)) if start_line is not None else 1
+        last = min(len(lines), int(end_line)) if end_line is not None else len(lines)
+        if first > len(lines):
+            return f"ERROR: start_line {first} past end of file ({len(lines)} lines)"
+        if last < first:
+            return f"ERROR: end_line {last} before start_line {first}"
+        sliced = lines[first - 1:last]
+        header = f"# {path} lines {first}-{last} of {len(lines)}\n"
+        return header + "\n".join(sliced)
+    return text
 
 
 def _list_directory(workspace: Path, path: str = ".") -> str:
@@ -315,6 +358,9 @@ def _write_file(workspace: Path, path: str, content: str) -> str:
     if not path or not path.strip():
         return "ERROR: empty path"
     target = _resolve(workspace, path)
+    run_id = _run_id_for(workspace)
+    if blocked := check_write_allowed(workspace, target, run_id):
+        return blocked
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"wrote {len(content)} bytes to {path}"
@@ -344,6 +390,7 @@ def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
                glob: str | None = None, path: str | None = None) -> str:
     if glob and any(glob.lower().endswith(ext) for ext in (
         ".docx", ".doc", ".pdf", ".zip", ".png", ".jpg", ".xlsx", ".pptx",
+        ".ttf", ".otf", ".woff", ".woff2", ".eot",
     )):
         return "ERROR: grep not useful on binary files; use read_file for document text"
     if path:
@@ -366,6 +413,8 @@ def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
             args += ["--glob", glob]
         for secret_glob in _RG_SECRET_GLOBS:
             args += ["--glob", secret_glob]
+        for noise_glob in _RG_NOISE_GLOBS:
+            args += ["--glob", noise_glob]
         args += [pattern, str(search_root)]
         try:
             proc = _silent_run(args, capture_output=True, text=True, timeout=60)
@@ -392,6 +441,18 @@ def _filter_grep_output(workspace: Path, out: str) -> str:
     return "\n".join(kept) if kept else "(no matches)"
 
 
+def _grep_skip_file(path: Path) -> bool:
+    name = path.name.lower()
+    if name in {"package-lock.json", "pnpm-lock.yaml", "yarn.lock", "composer.lock"}:
+        return True
+    if is_binary_path(path):
+        return True
+    parts = {p.lower() for p in path.parts}
+    if "fonts" in parts and "assets" in parts:
+        return True
+    return False
+
+
 def _python_grep(workspace: Path, root: Path, pattern: str, glob: str | None) -> str:
     import re
     try:
@@ -402,6 +463,8 @@ def _python_grep(workspace: Path, root: Path, pattern: str, glob: str | None) ->
     files = root.rglob(glob) if glob else root.rglob("*")
     for f in files:
         if not f.is_file():
+            continue
+        if _grep_skip_file(f):
             continue
         if check_repo_path(workspace, f) is not None:
             continue
@@ -445,12 +508,17 @@ def _run_script(workspace: Path, script: str, args: list[str] | None = None) -> 
 
 
 def _web_fetch(workspace: Path, url: str, filename: str) -> str:
-    if not (url.startswith("http://") or url.startswith("https://")):
-        return "ERROR: web_fetch only supports http/https URLs"
+    if blocked := validate_fetch_url(url):
+        return blocked
     headers = {"User-Agent": "Mozilla/5.0 (compatible; Contextful/1.0)"}
     try:
-        with httpx.Client(timeout=30, follow_redirects=True, verify=certifi.where()) as c:
+        with httpx.Client(timeout=30, follow_redirects=False, verify=certifi.where()) as c:
             r = c.get(url, headers=headers)
+            if r.is_redirect and r.headers.get("location"):
+                redirect_url = urljoin(str(r.url), r.headers["location"])
+                if blocked := validate_fetch_url(redirect_url):
+                    return blocked
+                r = c.get(redirect_url, headers=headers)
             r.raise_for_status()
             text = r.text
     except Exception as exc:  # noqa: BLE001
@@ -496,7 +564,7 @@ def _gather_tree(workspace: Path, root: Path) -> list[str]:
         except OSError:
             return
         for child in children:
-            if child.name in {".git", "node_modules", "target", "dist", "__pycache__", ".venv", "venv"}:
+            if child.name in SKIP_DIR_NAMES:
                 continue
             rel = child.relative_to(workspace).as_posix()
             prefix = "dir" if child.is_dir() else "file"
@@ -511,7 +579,12 @@ def _gather_tree(workspace: Path, root: Path) -> list[str]:
     return lines
 
 
+def _repo_path_allowed(workspace: Path, fp: Path) -> bool:
+    return check_repo_path(workspace, fp) is None
+
+
 def _gather_context(workspace: Path, path: str) -> str:
+    clear_ignore_cache()
     target = _resolve(workspace, path)
     if not target.exists():
         return f"ERROR: path not found: {path}"
@@ -519,6 +592,7 @@ def _gather_context(workspace: Path, path: str) -> str:
         return blocked
 
     sections: list[str] = [f"# Context bundle for {path}\n"]
+    search_root = target if target.is_dir() else target.parent
 
     doc_candidates: list[Path] = []
     if target.is_file():
@@ -526,17 +600,36 @@ def _gather_context(workspace: Path, path: str) -> str:
     else:
         for name in ("README.md", "README", "README.txt", "ARCHITECTURE.md", "CONTRIBUTING.md"):
             p = target / name
-            if p.is_file():
+            if p.is_file() and _repo_path_allowed(workspace, p):
                 doc_candidates.append(p)
-        docs_dir = target / "docs"
-        if docs_dir.is_dir():
-            for fp in sorted(docs_dir.rglob("*")):
-                if not fp.is_file() or fp.suffix.lower() not in {".md", ".txt", ".rst"}:
-                    continue
-                if check_repo_path(workspace, fp) is not None:
-                    continue
-                doc_candidates.append(fp)
-                if len(doc_candidates) >= 8:
+
+    api_patterns = ("openapi", "swagger", "graphql")
+    doc_suffixes = {".md", ".txt", ".rst"}
+    api_suffixes = {".yaml", ".yml", ".json", ".graphql", ".gql"}
+
+    if search_root.is_dir():
+        for fp in bounded_walk(search_root):
+            if not _repo_path_allowed(workspace, fp):
+                continue
+            lower = fp.name.lower()
+            if fp.suffix.lower() in doc_suffixes and fp not in doc_candidates:
+                if fp.parent.name == "docs" or fp.name in {
+                    "README.md", "README", "README.txt", "ARCHITECTURE.md", "CONTRIBUTING.md",
+                }:
+                    doc_candidates.append(fp)
+                    if len(doc_candidates) >= 8:
+                        break
+
+    api_files: list[str] = []
+    if search_root.is_dir():
+        for fp in bounded_walk(search_root):
+            if not _repo_path_allowed(workspace, fp):
+                continue
+            lower = fp.name.lower()
+            if any(p in lower for p in api_patterns) and fp.suffix.lower() in api_suffixes:
+                rel = fp.relative_to(workspace).as_posix()
+                api_files.append(f"### {rel}\n{_excerpt_file(fp, 4000)}\n")
+                if len(api_files) >= 4:
                     break
 
     if doc_candidates:
@@ -552,26 +645,13 @@ def _gather_context(workspace: Path, path: str) -> str:
         "requirements.txt", "composer.json", "pom.xml",
     )
     manifests: list[str] = []
-    search_root = target if target.is_dir() else target.parent
     for name in manifest_names:
         fp = search_root / name
-        if fp.is_file() and check_repo_path(workspace, fp) is None:
+        if fp.is_file() and _repo_path_allowed(workspace, fp):
             manifests.append(f"### {fp.relative_to(workspace).as_posix()}\n{_excerpt_file(fp, 2000)}\n")
     if manifests:
         sections.append("## Stack manifests\n" + "\n".join(manifests))
 
-    api_patterns = ("openapi", "swagger", "graphql")
-    api_files: list[str] = []
-    if search_root.is_dir():
-        for fp in sorted(search_root.rglob("*")):
-            if not fp.is_file() or check_repo_path(workspace, fp) is not None:
-                continue
-            lower = fp.name.lower()
-            if any(p in lower for p in api_patterns) and fp.suffix.lower() in {".yaml", ".yml", ".json", ".graphql", ".gql"}:
-                rel = fp.relative_to(workspace).as_posix()
-                api_files.append(f"### {rel}\n{_excerpt_file(fp, 4000)}\n")
-                if len(api_files) >= 4:
-                    break
     if api_files:
         sections.append("## API specs\n" + "\n".join(api_files))
 
@@ -591,7 +671,12 @@ def execute_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
     workspace = Path(workspace)
     try:
         if name == "read_file":
-            return _read_file(workspace, args["path"])
+            return _read_file(
+                workspace,
+                args["path"],
+                args.get("start_line"),
+                args.get("end_line"),
+            )
         if name == "list_directory":
             return _list_directory(workspace, args.get("path", "."))
         if name == "write_file":

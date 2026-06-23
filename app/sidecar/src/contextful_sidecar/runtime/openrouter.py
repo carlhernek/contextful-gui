@@ -1,13 +1,21 @@
 """Async OpenRouter client with streaming chat completions."""
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 from typing import Any, Callable
 
 import certifi
 import httpx
 
+from contextful_sidecar.runtime.transient import is_transient_exception
+
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+LLM_MAX_RETRIES = 2
+LLM_RETRY_BASE_DELAY_SEC = 2.0
+LLM_RETRY_MAX_DELAY_SEC = 20.0
+_TRANSIENT_HTTP = frozenset({429, 502, 503, 504})
 
 
 class OpenRouterClient:
@@ -46,18 +54,47 @@ class OpenRouterClient:
         }
         if tools:
             body["tools"] = tools
-        async with httpx.AsyncClient(verify=certifi.where(), timeout=300) as c:
-            if not body["stream"]:
-                r = await c.post(
-                    f"{OPENROUTER_BASE}/chat/completions", headers=self.headers, json=body
-                )
-                r.raise_for_status()
-                return r.json()
-            return await self._stream(c, body, on_token)
+
+        last_exc: BaseException | None = None
+        for attempt in range(LLM_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(verify=certifi.where(), timeout=300) as c:
+                    if not body["stream"]:
+                        r = await c.post(
+                            f"{OPENROUTER_BASE}/chat/completions", headers=self.headers, json=body
+                        )
+                        if r.status_code in _TRANSIENT_HTTP and attempt < LLM_MAX_RETRIES:
+                            await self._backoff(attempt)
+                            continue
+                        r.raise_for_status()
+                        return r.json()
+                    return await self._stream(c, body, on_token)
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                if exc.response.status_code in _TRANSIENT_HTTP and attempt < LLM_MAX_RETRIES:
+                    await self._backoff(attempt)
+                    continue
+                raise
+            except (httpx.TransportError, httpx.ReadTimeout, asyncio.TimeoutError) as exc:
+                last_exc = exc
+                if attempt < LLM_MAX_RETRIES and is_transient_exception(exc):
+                    await self._backoff(attempt)
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("chat_completion failed without response")
+
+    async def _backoff(self, attempt: int) -> None:
+        delay = min(
+            LLM_RETRY_BASE_DELAY_SEC * (2 ** attempt) + random.uniform(0, 0.5),
+            LLM_RETRY_MAX_DELAY_SEC,
+        )
+        await asyncio.sleep(delay)
 
     async def _stream(self, client, body, on_token) -> dict[str, Any]:
         content = ""
-        tool_calls: dict[int, dict] = {}  # accumulate deltas BY INDEX
+        tool_calls: dict[int, dict] = {}
         async with client.stream(
             "POST", f"{OPENROUTER_BASE}/chat/completions", headers=self.headers, json=body
         ) as resp:

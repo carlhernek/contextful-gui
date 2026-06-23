@@ -139,11 +139,11 @@ function endOfMinute(d: Date): Date {
   return new Date(d.getTime() + 59_999);
 }
 
-export function filterByDateRange(
-  entries: EventLogEntry[],
+export function filterByDateRange<T extends EventLogEntry>(
+  entries: T[],
   from?: Date | null,
   to?: Date | null,
-): EventLogEntry[] {
+): T[] {
   if (!from && !to) return entries;
   const toInclusive = to ? endOfMinute(to) : null;
   return entries.filter((e) => {

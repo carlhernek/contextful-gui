@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
-import { api, onContextfulEvent, type RunArtifacts } from "../lib/ipc";
+import { api, onContextfulEvent, type RunArtifacts, type RunState } from "../lib/ipc";
 import { useRunProgress } from "../hooks/useRunProgress";
+import { canResumeRun } from "../lib/runProgress";
 import { TasksPanel } from "./TasksPanel";
 import { IndexButton } from "./IndexButton";
 import { RunModuleProgress } from "./RunModuleProgress";
@@ -21,15 +22,30 @@ function finishedModules(artifacts: RunArtifacts | null): string[] {
   );
 }
 
-export function ResultsView({ projectId, runId }: { projectId: string; runId: string | null }) {
+export function ResultsView({
+  projectId,
+  runId,
+  onResume,
+  runBusy: externalRunBusy,
+  resumeError,
+  onDismissResumeError,
+}: {
+  projectId: string;
+  runId: string | null;
+  onResume?: (state: RunState) => void;
+  runBusy?: boolean;
+  resumeError?: string | null;
+  onDismissResumeError?: () => void;
+}) {
   const [artifacts, setArtifacts] = useState<RunArtifacts | null>(null);
   const [active, setActive] = useState<string | null>(null);
   const [tab, setTab] = useState<"analysis" | "tasks" | "activity">("analysis");
   const [loading, setLoading] = useState(false);
-  const { busy: runBusy } = useJob("run", projectId);
+  const { busy: jobRunBusy } = useJob("run", projectId);
+  const runBusy = externalRunBusy ?? jobRunBusy;
   const artifactModuleIds = artifacts?.modules.map((m) => m.moduleId) ?? [];
   const finishedModuleIds = finishedModules(artifacts);
-  const { stages } = useRunProgress(
+  const { stages, runState } = useRunProgress(
     projectId,
     runId,
     artifactModuleIds,
@@ -113,8 +129,42 @@ export function ResultsView({ projectId, runId }: { projectId: string; runId: st
           : null
       : null;
 
+  const resumable =
+    runState && onResume && canResumeRun(runState, artifactModuleIds);
+
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
+      {resumable && (
+        <div className="flex items-center justify-between gap-2 border-b border-cf-danger/30 bg-cf-danger/10 px-3 py-2 text-sm">
+          <span className="text-cf-ink">
+            Run {runState.status}
+            {runState.failedModule ? ` at ${runState.failedModule}` : ""}
+            {runState.error ? ` — ${runState.error}` : ""}
+          </span>
+          <button
+            type="button"
+            disabled={runBusy}
+            className="shrink-0 rounded-md bg-cf-success px-3 py-1 text-xs font-medium text-cf-bg hover:opacity-90 disabled:opacity-40"
+            onClick={() => onResume(runState)}
+          >
+            Resume run
+          </button>
+        </div>
+      )}
+      {resumeError && (
+        <div className="flex items-center justify-between gap-2 border-b border-cf-danger/30 bg-cf-danger/10 px-3 py-2 text-sm text-cf-danger">
+          <span>{resumeError}</span>
+          {onDismissResumeError && (
+            <button
+              type="button"
+              className="text-xs text-cf-muted hover:text-cf-ink"
+              onClick={onDismissResumeError}
+            >
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
       {stages.length > 1 && (
         <div className="border-b border-cf-border px-3 py-2">
           <RunModuleProgress stages={stages} compact />

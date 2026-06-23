@@ -99,6 +99,14 @@ async def run_agent(
 
     while turn < max_turns:
         turn += 1
+        if turn == max_turns - 3 and (not wrote_analysis or not wrote_tasks):
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Turn budget warning: {turn}/{max_turns}. "
+                    "Stop exploring and call write_analysis + write_tasks now with grounded findings so far."
+                ),
+            })
         if on_event:
             on_event("turn", {"module": module_id, "turn": turn, "maxTurns": max_turns})
         log_step(

@@ -11,6 +11,7 @@ WORKSPACE_INDEX_MODULE = "workspace-index"
 
 DEFAULT_MAX_TURNS = 24
 DEFAULT_INDEX_MAX_TURNS = 8
+RESUME_BONUS_TURNS = 16
 MIN_TURNS = 4
 MAX_TURNS = 64
 
@@ -54,17 +55,21 @@ def _default_max_turns(config: dict[str, Any] | None) -> int:
         return DEFAULT_MAX_TURNS
 
 
-def get_max_turns(workspace: Path, module_id: str) -> int:
+def get_max_turns(workspace: Path, module_id: str, *, resume: bool = False) -> int:
     """Turn budget for a standard analysis module run."""
     config = _load_config(str(Path(workspace).resolve()))
     entry = _module_entry(config, module_id)
     raw = entry.get("maxTurns")
     if raw is None:
-        return _default_max_turns(config)
-    try:
-        return _clamp_turns(int(raw))
-    except (TypeError, ValueError):
-        return _default_max_turns(config)
+        base = _default_max_turns(config)
+    else:
+        try:
+            base = _clamp_turns(int(raw))
+        except (TypeError, ValueError):
+            base = _default_max_turns(config)
+    if resume:
+        return _clamp_turns(base + RESUME_BONUS_TURNS)
+    return base
 
 
 def get_index_max_turns(workspace: Path) -> int:

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Project, type SetupStatus } from "./lib/ipc";
+import { api, type Project, type RunState, type SetupStatus } from "./lib/ipc";
 import { SetupWizard } from "./components/SetupWizard";
 import { ProjectSidebar } from "./components/ProjectSidebar";
 import { PipelineTab } from "./components/PipelineTab";
@@ -14,6 +14,7 @@ import { ActivityIndicator } from "./components/ActivityIndicator";
 import { Spinner } from "./components/Spinner";
 import { JobsProvider } from "./lib/jobs";
 import { useModuleSelection } from "./hooks/useModuleSelection";
+import { useResumeRun } from "./hooks/useResumeRun";
 
 type Tab = "chat" | "pipeline" | "meta" | "repos" | "results" | "logs";
 
@@ -35,6 +36,7 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
   const [historyKey, setHistoryKey] = useState(0);
   const [modulesRefreshKey, setModulesRefreshKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
 
   const refreshProjects = async () => setProjects(await api.listProjects());
 
@@ -63,6 +65,25 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
   };
 
   const active = projects.find((p) => p.id === activeId) ?? null;
+
+  const { resume: resumeRun, runBusy: resumeRunBusy } = useResumeRun(
+    active?.id ?? "",
+    (runId) => {
+      setActiveRunId(runId);
+      setResumeError(null);
+      setHistoryKey((k) => k + 1);
+    },
+    () => setHistoryKey((k) => k + 1),
+  );
+
+  const handleResumeRun = async (state: RunState) => {
+    if (!active) return;
+    try {
+      await resumeRun(state);
+    } catch (e) {
+      setResumeError(String(e));
+    }
+  };
 
   const handleRunIntent = (modules: string[], _force: boolean) => {
     setSelected(modules);
@@ -124,6 +145,13 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
               selected={selected}
               onChangeSelected={setSelected}
               modulesRefreshKey={modulesRefreshKey}
+              activeRunId={activeRunId}
+              historyKey={historyKey}
+              onSelectRun={(runId) => {
+                setActiveRunId(runId);
+                setTab("results");
+              }}
+              onResumeRun={(state) => void handleResumeRun(state)}
               onRunStart={(runId) => {
                 setActiveRunId(runId);
                 setHistoryKey((k) => k + 1);
@@ -145,9 +173,17 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
                 activeRunId={activeRunId}
                 refreshKey={historyKey}
                 onSelect={setActiveRunId}
+                onResume={(state) => void handleResumeRun(state)}
               />
               <div className="h-[70vh] min-w-0 overflow-hidden rounded-lg border border-cf-border bg-cf-surface">
-                <ResultsView projectId={active.id} runId={activeRunId} />
+                <ResultsView
+                  projectId={active.id}
+                  runId={activeRunId}
+                  onResume={(state) => void handleResumeRun(state)}
+                  runBusy={resumeRunBusy}
+                  resumeError={resumeError}
+                  onDismissResumeError={() => setResumeError(null)}
+                />
               </div>
             </div>
           ) : (

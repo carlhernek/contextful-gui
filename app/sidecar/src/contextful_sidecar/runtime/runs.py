@@ -69,6 +69,11 @@ def save_run_state(workspace: Path, run_id: str, **updates: Any) -> dict[str, An
     state = dict(prev)
     state.update(updates)
     state["runId"] = run_id
+    if state.get("status") == "failed":
+        err = state.get("error")
+        if not (isinstance(err, str) and err.strip()):
+            failed = state.get("failedModule")
+            state["error"] = f"{failed} failed" if failed else "Run failed"
     state["updatedAt"] = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     new_status = state.get("status")
     old_status = prev.get("status")
@@ -193,6 +198,9 @@ async def _run_modules_body(
     else:
         planned_modules = list(prev["plannedModules"])
 
+    prev_status = prev.get("status")
+    is_resuming = resume and prev_status in {"failed", "cancelled"}
+
     start_msg = f"runId={run_id} app=v{app_version} modules={version} ({len(to_run)} to run)"
     if force_reindex:
         start_msg += " forceReindex=true"
@@ -248,6 +256,7 @@ async def _run_modules_body(
                 run_id=run_id, repo_paths=repo_paths, meta_docs=meta_docs,
                 project_type=project_type, specific_instructions=specific_instructions,
                 on_event=on_event, should_cancel=should_cancel,
+                resume=is_resuming,
             )
 
         if should_cancel() or error == "cancelled":
@@ -362,7 +371,7 @@ async def _run_workspace_index(
 
 async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, run_id,
                                   repo_paths, meta_docs, project_type, specific_instructions,
-                                  on_event, should_cancel) -> tuple[str, str | None]:
+                                  on_event, should_cancel, resume: bool = False) -> tuple[str, str | None]:
     attempt = 0
     while True:
         try:
@@ -371,7 +380,7 @@ async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, r
                 module_id=module_id, run_id=run_id, repo_paths=repo_paths, meta_docs=meta_docs,
                 project_type=project_type, specific_instructions=specific_instructions,
                 on_event=on_event,
-                max_turns=get_max_turns(ws, module_id),
+                max_turns=get_max_turns(ws, module_id, resume=resume),
             )
             if summary.endswith("(incomplete)"):
                 raise RuntimeError(summary)

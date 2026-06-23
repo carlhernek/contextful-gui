@@ -75,3 +75,29 @@ export function deriveModuleStages(
 export function completedModuleCount(stages: ModuleStage[]): number {
   return stages.filter((s) => s.status === "complete").length;
 }
+
+export function canResumeRun(state: RunState, artifactModuleIds: string[] = []): boolean {
+  if (state.status !== "failed" && state.status !== "cancelled") {
+    return false;
+  }
+  if (state.failedModule) {
+    return true;
+  }
+  const planned = resolvePlannedModules(state, artifactModuleIds);
+  if (!planned.length) {
+    return artifactModuleIds.length > 0;
+  }
+  const completed = new Set(state.completedModules);
+  return planned.some((id) => !completed.has(id));
+}
+
+export function modulesForResume(state: RunState, artifactModuleIds: string[] = []): string[] {
+  const planned = resolvePlannedModules(state, artifactModuleIds);
+  if (planned.length) {
+    return planned;
+  }
+  if (state.failedModule) {
+    return [state.failedModule];
+  }
+  return artifactModuleIds.length ? orderModules(artifactModuleIds) : [];
+}

@@ -50,3 +50,21 @@ def test_index_max_turns_per_item(tmp_path: Path):
         "modules": {"workspace-index": {"maxTurnsPerItem": 10}},
     })
     assert get_index_max_turns(tmp_path) == 10
+
+
+def test_resume_bonus_turns(tmp_path: Path):
+    _write_config(tmp_path, {
+        "defaults": {"maxTurns": 24},
+        "modules": {"b2b-low-hanging-features": {"maxTurns": 40}},
+    })
+    assert get_max_turns(tmp_path, "b2b-low-hanging-features") == 40
+    assert get_max_turns(tmp_path, "b2b-low-hanging-features", resume=True) == 56
+    assert get_max_turns(tmp_path, "dependency-health", resume=True) == 40
+
+
+def test_failed_run_state_gets_default_error(tmp_path: Path):
+    from contextful_sidecar.runtime.runs import save_run_state, load_run_state
+
+    save_run_state(tmp_path, "r1", status="failed", failedModule="b2b-low-hanging-features", error="")
+    state = load_run_state(tmp_path, "r1")
+    assert state["error"] == "b2b-low-hanging-features failed"

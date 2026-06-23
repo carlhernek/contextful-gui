@@ -1,9 +1,13 @@
-"""grep_repo noise filtering and read_file line ranges."""
+"""grep_repo noise filtering, path parsing, and read_file line ranges."""
 from __future__ import annotations
 
 from pathlib import Path
 
-from contextful_sidecar.runtime.tools import execute_tool
+from contextful_sidecar.runtime.tools import (
+    _grep_parse_file_path,
+    execute_tool,
+    set_run_context,
+)
 
 
 def _ws(tmp_path: Path) -> Path:
@@ -44,3 +48,26 @@ def test_read_file_line_range(tmp_path: Path):
     assert "line 10" in out
     assert "line 12" in out
     assert "line 13" not in out
+
+
+def test_grep_parse_windows_path():
+    line = r"C:\repos\API\src\main.rs:42:fn main() {"
+    fp = _grep_parse_file_path(line)
+    assert fp == Path(r"C:\repos\API\src\main.rs")
+
+
+def test_write_tasks_wraps_tasks_array(tmp_path: Path):
+    ws = _ws(tmp_path)
+    (ws / "runs" / "run-1" / "mod").mkdir(parents=True)
+    set_run_context(ws, "run-1")
+    payload = """{
+      "tasks": [{
+        "id": "T-1", "title": "x", "priority": "high", "effort": "S",
+        "evidence": ["repos/web/a.ts:1"], "rationale": "y", "agentic_spec": "z"
+      }]
+    }"""
+    out = execute_tool(ws, "write_tasks", {"module_id": "mod", "tasks_json": payload})
+    assert out.startswith("wrote")
+    written = (ws / "runs" / "run-1" / "mod" / "tasks.json").read_text(encoding="utf-8")
+    assert '"moduleId": "mod"' in written
+    assert '"runId": "run-1"' in written

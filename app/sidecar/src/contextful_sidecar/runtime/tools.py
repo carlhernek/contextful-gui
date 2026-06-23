@@ -7,8 +7,9 @@ import shutil
 import subprocess
 import sys
 import time
+import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin
 
 import certifi
@@ -40,6 +41,7 @@ RUN_SCRIPT_TIMEOUT = 120         # seconds
 RUN_SCRIPT_OUTPUT_CAP = 8000     # chars
 GREP_MAX_MATCHES = 200
 GREP_MAX_LINE_LEN = 400
+GREP_SOFT_DEADLINE_SEC = 45.0
 GATHER_CONTEXT_CAP = 24_000        # chars for gather_context bundle
 GATHER_DOC_EXCERPT = 3000          # per doc file excerpt
 GATHER_TREE_DEPTH = 2
@@ -212,7 +214,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "grep_repo",
-            "description": "Bounded ripgrep over read-only target repos.",
+            "description": (
+                "Bounded ripgrep over read-only target repos. Prefer path (e.g. repos/API/src) "
+                "or repo + glob on large codebases; whole-repo greps on Rust/TS monorepos are slow."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -401,12 +406,48 @@ def _write_tasks(workspace: Path, module_id: str, tasks_json: str) -> str:
         parsed = json.loads(tasks_json) if isinstance(tasks_json, str) else tasks_json
     except json.JSONDecodeError as exc:
         return f"ERROR: invalid tasks JSON: {exc}"
+    if isinstance(parsed, dict) and "moduleId" not in parsed:
+        if "tasks" in parsed and isinstance(parsed["tasks"], list):
+            parsed = {
+                "moduleId": module_id,
+                "runId": run_id or parsed.get("runId", ""),
+                "tasks": parsed["tasks"],
+            }
+        else:
+            return "ERROR: tasks JSON must include moduleId, runId, and tasks array"
     from contextful_sidecar.runtime.schema import validate_tasks
     error = validate_tasks(parsed)
     if error:
         return f"ERROR: tasks failed schema validation: {error}"
     rel = f"runs/{run_id}/{module_id}/tasks.json"
     return _write_file(workspace, rel, json.dumps(parsed, indent=2))
+
+
+def _find_rg() -> str | None:
+    found = shutil.which("rg")
+    if found:
+        return found
+    if sys.platform == "win32":
+        for cand in (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "ripgrep" / "rg.exe",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "ripgrep" / "rg.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "rg.exe",
+        ):
+            if cand.is_file():
+                return str(cand)
+    return None
+
+
+def _grep_parse_file_path(line: str) -> Path | None:
+    """Parse ripgrep line output path (handles Windows drive letters via rsplit)."""
+    parts = line.rsplit(":", 2)
+    if len(parts) != 3:
+        return None
+    try:
+        int(parts[1])
+    except ValueError:
+        return None
+    return Path(parts[0])
 
 
 def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
@@ -432,7 +473,12 @@ def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
         return "ERROR: grep not useful on binary files; use read_file"
     if blocked := check_repo_path(workspace, search_root):
         return blocked
-    rg = shutil.which("rg")
+    rg = _find_rg()
+    started = time.monotonic()
+
+    def over_budget() -> bool:
+        return time.monotonic() - started > GREP_SOFT_DEADLINE_SEC
+
     if rg:
         args = [rg, "--line-number", "--no-heading", "--color", "never",
                 "--max-count", str(GREP_MAX_MATCHES)]
@@ -446,30 +492,71 @@ def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
         try:
             proc = _silent_run(args, capture_output=True, text=True, timeout=60)
             out = proc.stdout or proc.stderr or "(no matches)"
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        except subprocess.TimeoutExpired:
+            return "ERROR: ripgrep timed out after 60s; use path to narrow search (e.g. repos/API/src)"
+        except OSError as exc:
             return f"ERROR: grep failed: {exc}"
     else:
         if trace:
             trace.set_phase("scan")
-        out = _python_grep(workspace, search_root, pattern, glob, trace=trace)
+        out = _python_grep(workspace, search_root, pattern, glob, trace=trace, over_budget=over_budget)
     if trace:
-        trace.set_phase("scan")
+        trace.set_phase("filter")
         trace.tick("matches", len(out.splitlines()) if out else 0)
-    return _cap_grep_output(_filter_grep_output(workspace, out))
+    filtered = _filter_grep_output(workspace, out, trace=trace)
+    if over_budget() and filtered not in {"(no matches)", "(no output)"}:
+        filtered += "\n(partial: soft deadline reached during grep)"
+    return _cap_grep_output(filtered)
 
 
-def _filter_grep_output(workspace: Path, out: str) -> str:
+def _filter_grep_output(workspace: Path, out: str, trace: ToolTrace | None = None) -> str:
     if not out or out in {"(no matches)", "(no output)"}:
         return out
-    kept: list[str] = []
+    trace = trace or get_trace()
+    if trace:
+        trace.set_phase("filter")
+    parsed: list[tuple[str, Path]] = []
     for line in out.splitlines():
-        colon = line.find(":")
-        if colon <= 0:
+        fp = _grep_parse_file_path(line)
+        if fp is None:
+            colon = line.find(":")
+            if colon <= 0:
+                parsed.append((line, Path()))
+                continue
+            fp = Path(line[:colon])
+        parsed.append((line, fp))
+
+    unique_files: list[Path] = []
+    seen: set[str] = set()
+    for _, fp in parsed:
+        if not fp.parts:
+            continue
+        key = fp.resolve().as_posix()
+        if key not in seen:
+            seen.add(key)
+            unique_files.append(fp.resolve())
+
+    allowed: set[Path] = set()
+    if unique_files:
+        loc = repo_location(workspace, unique_files[0])
+        if loc:
+            repo_root, _ = loc
+            allowed = classify_repo_files(workspace, repo_root, unique_files)
+        else:
+            allowed = set(unique_files)
+
+    kept: list[str] = []
+    for line, fp in parsed:
+        if not fp.parts:
             kept.append(line)
             continue
-        file_path = Path(line[:colon])
-        if check_repo_path(workspace, file_path) is None:
-            kept.append(line)
+        try:
+            if fp.resolve() in allowed:
+                kept.append(line)
+        except OSError:
+            continue
+        if trace:
+            trace.tick("filtered", path=str(fp))
     return "\n".join(kept) if kept else "(no matches)"
 
 
@@ -485,21 +572,40 @@ def _grep_skip_file(path: Path) -> bool:
     return False
 
 
-def _python_grep(workspace: Path, root: Path, pattern: str, glob: str | None,
-                 trace: ToolTrace | None = None) -> str:
+def _python_grep(
+    workspace: Path,
+    root: Path,
+    pattern: str,
+    glob: str | None,
+    trace: ToolTrace | None = None,
+    over_budget: Callable[[], bool] | None = None,
+) -> str:
     import re
     try:
         rx = re.compile(pattern)
     except re.error as exc:
         return f"ERROR: bad pattern: {exc}"
+
+    def glob_ok(p: Path) -> bool:
+        if not glob:
+            return True
+        return fnmatch.fnmatch(p.name, glob) or fnmatch.fnmatch(p.as_posix(), glob)
+
+    candidates = bounded_walk(
+        root,
+        include_file=glob_ok,
+        should_stop=over_budget,
+    )
+    allowed: set[Path] = set(candidates)
+    loc = repo_location(workspace, root)
+    if loc:
+        allowed = classify_repo_files(workspace, loc[0], candidates)
+
     matches: list[str] = []
-    files = root.rglob(glob) if glob else root.rglob("*")
-    for f in files:
-        if not f.is_file():
-            continue
+    for f in sorted(allowed, key=lambda p: p.as_posix().lower()):
+        if over_budget and over_budget():
+            break
         if _grep_skip_file(f):
-            continue
-        if check_repo_path(workspace, f) is not None:
             continue
         try:
             for i, line in enumerate(f.open("r", encoding="utf-8", errors="replace"), 1):

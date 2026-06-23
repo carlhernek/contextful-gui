@@ -40,6 +40,7 @@
     IfFileExists "$R3\uninstall.exe" 0 cf_preinstall_done
 
     !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+    !insertmacro CheckIfAppIsRunning "contextful-sidecar.exe" "${PRODUCTNAME}"
 
     ClearErrors
     StrCpy $R4 "$R0 /S _?=$R3"

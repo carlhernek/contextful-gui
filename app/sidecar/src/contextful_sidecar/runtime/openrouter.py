@@ -71,10 +71,19 @@ class OpenRouterClient:
                     return await self._stream(c, body, on_token)
             except httpx.HTTPStatusError as exc:
                 last_exc = exc
+                detail = ""
+                try:
+                    detail = (exc.response.text or "")[:500].strip()
+                except Exception:  # noqa: BLE001
+                    pass
+                if detail:
+                    last_exc = RuntimeError(
+                        f"OpenRouter HTTP {exc.response.status_code}: {detail}"
+                    )
                 if exc.response.status_code in _TRANSIENT_HTTP and attempt < LLM_MAX_RETRIES:
                     await self._backoff(attempt)
                     continue
-                raise
+                raise last_exc
             except (httpx.TransportError, httpx.ReadTimeout, asyncio.TimeoutError) as exc:
                 last_exc = exc
                 if attempt < LLM_MAX_RETRIES and is_transient_exception(exc):

@@ -33,6 +33,15 @@ def _is_transient(exc: BaseException) -> bool:
     return any(m in msg for m in _TRANSIENT_MARKERS)
 
 
+def format_exception(exc: BaseException) -> str:
+    """Stable error text for logs when str(exc) is empty (e.g. some transport errors)."""
+    text = str(exc).strip()
+    if text:
+        return text
+    name = type(exc).__name__
+    return f"{name} (no message)"
+
+
 # --- run state ------------------------------------------------------------
 def _run_dir(workspace: Path, run_id: str) -> Path:
     return Path(workspace) / "runs" / run_id
@@ -310,7 +319,7 @@ async def run_modules(
         raise
     except Exception as exc:
         completed = load_run_state(ws, run_id).get("completedModules", [])
-        err = str(exc)
+        err = format_exception(exc)
         save_run_state(ws, run_id, status="failed", error=err)
         append_eventlog(ws, "run", "ERROR", f"runId={run_id} unhandled: {err}")
         on_event("run", {"runId": run_id, "status": "failed", "completedModules": completed, "error": err})
@@ -348,7 +357,7 @@ async def _run_workspace_index(
     except asyncio.CancelledError:
         return "", "cancelled"
     except Exception as exc:  # noqa: BLE001
-        return "", str(exc)
+        return "", format_exception(exc)
 
 
 async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, run_id,
@@ -387,7 +396,7 @@ async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, r
                 except asyncio.CancelledError:
                     return "", "cancelled"
                 continue
-            return "", str(exc)
+            return "", format_exception(exc)
 
 
 def _write_run_summary(ws: Path, run_id: str, completed: list[str], project_type: str,

@@ -61,12 +61,27 @@ async def logged_chat_completion(
         **extra,
     )
     t0 = time.monotonic()
-    response = await client.chat_completion(
-        model=model,
-        messages=messages,
-        tools=tools,
-        on_token=on_token,
-    )
+    try:
+        response = await client.chat_completion(
+            model=model,
+            messages=messages,
+            tools=tools,
+            on_token=on_token,
+        )
+    except Exception as exc:  # noqa: BLE001
+        from contextful_sidecar.runtime.runs import format_exception
+        err = format_exception(exc)
+        log_step(
+            workspace,
+            scope=scope,
+            status="LLM_ERROR",
+            message=err,
+            run_id=run_id,
+            module_id=module_id,
+            activity_kind="error",
+            **extra,
+        )
+        raise
     duration_ms = int((time.monotonic() - t0) * 1000)
     choice = response["choices"][0]
     message = choice["message"]

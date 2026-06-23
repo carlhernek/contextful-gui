@@ -764,7 +764,12 @@ async fn start_run(
             Some("failed") | Some("cancelled") => {
                 let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("failed");
                 let _ = workspace::set_run_status(&install, &id, &run_id, status);
-                guard.fail();
+                let err = v
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .or_else(|| v.get("failedModule").and_then(|m| m.as_str()))
+                    .unwrap_or("run failed");
+                guard.fail_with("run", &format!("run_modules {status} — {err}"));
             }
             _ => {}
         },

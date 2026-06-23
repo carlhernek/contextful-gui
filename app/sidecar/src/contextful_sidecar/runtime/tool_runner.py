@@ -42,6 +42,11 @@ def _cap_result(result: str, cap: int = TOOL_RESULT_CAP) -> str:
     return result[:cap] + "\n...[truncated]"
 
 
+def cap_tool_message(result: str, cap: int = TOOL_RESULT_CAP) -> str:
+    """Cap tool output stored in LLM message history (activity keeps full result)."""
+    return _cap_result(result, cap)
+
+
 def _args_summary(args: dict[str, Any]) -> str:
     try:
         text = json.dumps(args)[:160]

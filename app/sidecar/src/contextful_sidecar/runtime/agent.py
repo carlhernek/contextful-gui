@@ -10,7 +10,7 @@ from contextful_sidecar.runtime.agents import compose_module_prompt
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.step_log import log_step, logged_chat_completion
-from contextful_sidecar.runtime.tool_runner import run_tool_with_liveness
+from contextful_sidecar.runtime.tool_runner import cap_tool_message, run_tool_with_liveness
 from contextful_sidecar.runtime.tools import (
     TOOL_DEFINITIONS,
     execute_tool,
@@ -196,7 +196,7 @@ async def run_agent(
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id") or name,
-                "content": result,
+                "content": cap_tool_message(result),
             })
 
         if wrote_analysis and wrote_tasks:

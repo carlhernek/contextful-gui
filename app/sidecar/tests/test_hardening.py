@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from contextful_sidecar.runtime.repo_path_policy import check_repo_path, clear_ignore_cache
+from contextful_sidecar.runtime.repo_path_policy import check_repo_path
 from contextful_sidecar.runtime.ssrf_guard import validate_fetch_url
 from contextful_sidecar.runtime.tool_runner import (
     MAX_TOOL_RETRIES,
@@ -91,7 +91,6 @@ def test_gather_context_skips_git_and_is_fast(tmp_path: Path):
     for i in range(200):
         (git_dir / f"obj{i}").write_bytes(b"\x00" * 100)
 
-    clear_ignore_cache()
     t0 = time.monotonic()
     out = execute_tool(ws, "gather_context", {"path": "repos/web"})
     elapsed = time.monotonic() - t0
@@ -175,26 +174,29 @@ def test_tool_runner_no_retry_on_deterministic_error(tmp_path: Path):
     assert read_skips(ws, "run-1", "mod") == []
 
 
-def test_tool_runner_timeout_skips(tmp_path: Path):
+def test_tool_runner_timeout_no_retry(tmp_path: Path):
     ws = _ws(tmp_path)
+    attempts = {"n": 0}
 
     def slow(_ws: Path, _name: str, _args: dict) -> str:
+        attempts["n"] += 1
         time.sleep(0.2)
         return "ok"
 
     async def run():
         with patch("contextful_sidecar.runtime.tool_runner.TOOL_TIMEOUT_SEC", 0.05):
-            with patch("contextful_sidecar.runtime.tool_runner.TOOL_RETRY_BASE_DELAY_SEC", 0.01):
-                return await run_tool_with_liveness(
-                    workspace=ws,
-                    log_scope="mod",
-                    turn=1,
-                    name="gather_context",
-                    args={"path": "repos/web"},
-                    run_id="run-1",
-                    module_id="mod",
-                    tool_executor=slow,
-                )
+            return await run_tool_with_liveness(
+                workspace=ws,
+                log_scope="mod",
+                turn=1,
+                name="gather_context",
+                args={"path": "repos/web"},
+                run_id="run-1",
+                module_id="mod",
+                tool_executor=slow,
+            )
 
     result = asyncio.run(run())
-    assert "skipped" in result.lower() or "timed out" in result.lower()
+    assert attempts["n"] == 1
+    assert "timed out" in result.lower()
+    assert read_skips(ws, "run-1", "mod") == []

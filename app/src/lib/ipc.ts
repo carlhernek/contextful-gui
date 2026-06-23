@@ -162,6 +162,13 @@ export interface ActivityEntry {
   maxAttempts?: number;
   attempts?: number;
   reason?: string;
+  trace?: {
+    phase?: string;
+    counters?: Record<string, number>;
+    lastPath?: string;
+    idleSec?: number;
+    elapsedSec?: number;
+  };
 }
 
 export interface RunActivity {

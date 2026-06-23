@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -17,11 +18,20 @@ from contextful_sidecar.runtime.file_text import is_binary_path, read_file_as_te
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.repo_path_policy import (
     check_repo_path,
-    clear_ignore_cache,
+    classify_repo_files,
     filter_repo_children,
+    ignored_abs_paths,
+    repo_location,
+    reset_subprocess_budget,
 )
-from contextful_sidecar.runtime.repo_walk import SKIP_DIR_NAMES, bounded_walk
+from contextful_sidecar.runtime.repo_walk import (
+    GATHER_WALK_MAX_DEPTH,
+    SKIP_DIR_NAMES,
+    bounded_walk,
+    collect_dirs_under,
+)
 from contextful_sidecar.runtime.ssrf_guard import validate_fetch_url
+from contextful_sidecar.runtime.tool_trace import ToolTrace, get_trace, reset_active_trace, set_active_trace
 from contextful_sidecar.runtime.write_policy import check_write_allowed
 
 READ_FILE_CAP = 500_000          # 500KB cap for read_file
@@ -34,6 +44,7 @@ GATHER_CONTEXT_CAP = 24_000        # chars for gather_context bundle
 GATHER_DOC_EXCERPT = 3000          # per doc file excerpt
 GATHER_TREE_DEPTH = 2
 GATHER_TREE_MAX = 40
+GATHER_SOFT_DEADLINE_SEC = 45.0
 
 # Extra ripgrep globs — block common secrets even if tracked in git.
 _RG_SECRET_GLOBS = (
@@ -261,8 +272,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "gather_context",
             "description": (
-                "Gather a condensed context bundle for an item path: README/docs, API specs, "
-                "stack manifests, and a bounded directory tree. Prefer this for repos and large trees."
+                "Gather a condensed context bundle for a path: README/docs, API specs, "
+                "stack manifests, and a bounded directory tree. For large repos prefer a "
+                "subpath (e.g. repos/API/src) rather than the repo root."
             ),
             "parameters": {
                 "type": "object",
@@ -313,7 +325,11 @@ def _read_file(
     path: str,
     start_line: int | None = None,
     end_line: int | None = None,
+    trace: ToolTrace | None = None,
 ) -> str:
+    trace = trace or get_trace()
+    if trace:
+        trace.set_phase("read")
     target = _resolve(workspace, path)
     if target.is_dir():
         return f"ERROR: '{path}' is a directory; use list_directory"
@@ -322,6 +338,8 @@ def _read_file(
     if blocked := check_repo_path(workspace, target):
         return blocked
     text = read_file_as_text(target, cap=READ_FILE_CAP)
+    if trace:
+        trace.tick("bytes", len(text.encode("utf-8", errors="replace")), path=path)
     if text.startswith("ERROR:") or text.startswith("binary file"):
         return text
     if start_line is not None or end_line is not None:
@@ -340,7 +358,10 @@ def _read_file(
     return text
 
 
-def _list_directory(workspace: Path, path: str = ".") -> str:
+def _list_directory(workspace: Path, path: str = ".", trace: ToolTrace | None = None) -> str:
+    trace = trace or get_trace()
+    if trace:
+        trace.set_phase("iterdir")
     target = _resolve(workspace, path)
     if not target.exists():
         return "ERROR: directory not found"
@@ -350,6 +371,8 @@ def _list_directory(workspace: Path, path: str = ".") -> str:
     for child in filter_repo_children(workspace, target):
         kind = "dir" if child.is_dir() else "file"
         entries.append(f"{kind}\t{child.name}")
+        if trace:
+            trace.tick("entries", path=path)
     hint = "(note: a '.git' entry inside a worktree is a pointer file, not a directory)"
     return "\n".join(entries) + f"\n{hint}" if entries else f"(empty)\n{hint}"
 
@@ -387,7 +410,11 @@ def _write_tasks(workspace: Path, module_id: str, tasks_json: str) -> str:
 
 
 def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
-               glob: str | None = None, path: str | None = None) -> str:
+               glob: str | None = None, path: str | None = None,
+               trace: ToolTrace | None = None) -> str:
+    trace = trace or get_trace()
+    if trace:
+        trace.set_phase("rg_spawn")
     if glob and any(glob.lower().endswith(ext) for ext in (
         ".docx", ".doc", ".pdf", ".zip", ".png", ".jpg", ".xlsx", ".pptx",
         ".ttf", ".otf", ".woff", ".woff2", ".eot",
@@ -422,7 +449,12 @@ def _grep_repo(workspace: Path, pattern: str, repo: str | None = None,
         except (subprocess.TimeoutExpired, OSError) as exc:
             return f"ERROR: grep failed: {exc}"
     else:
-        out = _python_grep(workspace, search_root, pattern, glob)
+        if trace:
+            trace.set_phase("scan")
+        out = _python_grep(workspace, search_root, pattern, glob, trace=trace)
+    if trace:
+        trace.set_phase("scan")
+        trace.tick("matches", len(out.splitlines()) if out else 0)
     return _cap_grep_output(_filter_grep_output(workspace, out))
 
 
@@ -453,7 +485,8 @@ def _grep_skip_file(path: Path) -> bool:
     return False
 
 
-def _python_grep(workspace: Path, root: Path, pattern: str, glob: str | None) -> str:
+def _python_grep(workspace: Path, root: Path, pattern: str, glob: str | None,
+                 trace: ToolTrace | None = None) -> str:
     import re
     try:
         rx = re.compile(pattern)
@@ -472,6 +505,8 @@ def _python_grep(workspace: Path, root: Path, pattern: str, glob: str | None) ->
             for i, line in enumerate(f.open("r", encoding="utf-8", errors="replace"), 1):
                 if rx.search(line):
                     matches.append(f"{f}:{i}:{line.rstrip()}")
+                    if trace:
+                        trace.tick("matches", path=str(f))
                     if len(matches) >= GREP_MAX_MATCHES:
                         return "\n".join(matches)
         except OSError:
@@ -486,7 +521,11 @@ def _cap_grep_output(out: str) -> str:
     return "\n".join(capped)
 
 
-def _run_script(workspace: Path, script: str, args: list[str] | None = None) -> str:
+def _run_script(workspace: Path, script: str, args: list[str] | None = None,
+                trace: ToolTrace | None = None) -> str:
+    trace = trace or get_trace()
+    if trace:
+        trace.set_phase("exec")
     if not script.endswith(".py"):
         return "ERROR: run_script only runs .py files"
     target = _resolve(workspace, f"scripts/{Path(script).name}")
@@ -507,7 +546,10 @@ def _run_script(workspace: Path, script: str, args: list[str] | None = None) -> 
     return out or "(no output)"
 
 
-def _web_fetch(workspace: Path, url: str, filename: str) -> str:
+def _web_fetch(workspace: Path, url: str, filename: str, trace: ToolTrace | None = None) -> str:
+    trace = trace or get_trace()
+    if trace:
+        trace.set_phase("connect")
     if blocked := validate_fetch_url(url):
         return blocked
     headers = {"User-Agent": "Mozilla/5.0 (compatible; Contextful/1.0)"}
@@ -523,6 +565,9 @@ def _web_fetch(workspace: Path, url: str, filename: str) -> str:
             text = r.text
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: fetch failed: {exc}"
+    if trace:
+        trace.set_phase("download")
+        trace.tick("bytes", len(text.encode("utf-8", errors="replace")), path=url)
     if len(text) > WEB_FETCH_CAP:
         text = text[:WEB_FETCH_CAP] + "\n...[truncated]"
     body = PROVENANCE_HEADER.format(url=url) + text
@@ -553,38 +598,59 @@ def _excerpt_file(path: Path, cap: int = GATHER_DOC_EXCERPT) -> str:
     return data
 
 
-def _gather_tree(workspace: Path, root: Path) -> list[str]:
+def _gather_tree_from_allowed(
+    workspace: Path,
+    tree_root: Path,
+    allowed: set[Path],
+    trace: ToolTrace | None = None,
+) -> list[str]:
+    trace = trace or get_trace()
+    if trace:
+        trace.set_phase("tree")
     lines: list[str] = []
+    tree_root = tree_root.resolve()
+    ws = workspace.resolve()
+    seen: set[str] = set()
 
-    def walk(base: Path, depth: int) -> None:
-        if depth > GATHER_TREE_DEPTH or len(lines) >= GATHER_TREE_MAX:
+    def add_entry(kind: str, rel_posix: str) -> None:
+        if rel_posix in seen or len(lines) >= GATHER_TREE_MAX:
             return
+        seen.add(rel_posix)
+        lines.append(f"{kind}\t{rel_posix}")
+        if trace:
+            trace.tick("tree_entries", path=rel_posix)
+
+    for fp in sorted(allowed, key=lambda p: p.as_posix().lower()):
         try:
-            children = filter_repo_children(workspace, base)
-        except OSError:
-            return
-        for child in children:
-            if child.name in SKIP_DIR_NAMES:
-                continue
-            rel = child.relative_to(workspace).as_posix()
-            prefix = "dir" if child.is_dir() else "file"
-            lines.append(f"{prefix}\t{rel}")
-            if len(lines) >= GATHER_TREE_MAX:
-                return
-            if child.is_dir():
-                walk(child, depth + 1)
-
-    if root.is_dir():
-        walk(root, 0)
+            rel_to_root = fp.relative_to(tree_root)
+            rel_ws = fp.relative_to(ws).as_posix()
+        except ValueError:
+            continue
+        if len(rel_to_root.parts) > GATHER_TREE_DEPTH:
+            continue
+        for i in range(1, len(rel_to_root.parts)):
+            if i > GATHER_TREE_DEPTH:
+                break
+            dir_path = tree_root / Path(*rel_to_root.parts[:i])
+            try:
+                add_entry("dir", dir_path.relative_to(ws).as_posix())
+            except ValueError:
+                pass
+        add_entry("file", rel_ws)
+        if len(lines) >= GATHER_TREE_MAX:
+            break
     return lines
 
 
-def _repo_path_allowed(workspace: Path, fp: Path) -> bool:
-    return check_repo_path(workspace, fp) is None
+def _gather_context(workspace: Path, path: str, trace: ToolTrace | None = None) -> str:
+    trace = trace or get_trace()
+    started = time.monotonic()
 
+    def over_budget() -> bool:
+        return time.monotonic() - started > GATHER_SOFT_DEADLINE_SEC
 
-def _gather_context(workspace: Path, path: str) -> str:
-    clear_ignore_cache()
+    if trace:
+        trace.set_phase("init")
     target = _resolve(workspace, path)
     if not target.exists():
         return f"ERROR: path not found: {path}"
@@ -593,44 +659,93 @@ def _gather_context(workspace: Path, path: str) -> str:
 
     sections: list[str] = [f"# Context bundle for {path}\n"]
     search_root = target if target.is_dir() else target.parent
+    partial_note = ""
+
+    if trace:
+        trace.set_phase("walk")
+    ignored_dirs: set[Path] = set()
+    loc = repo_location(workspace, search_root) if search_root.is_dir() else None
+    if loc and not over_budget():
+        repo_root, _ = loc
+        shallow_dirs = collect_dirs_under(search_root, max_depth=3)
+        if shallow_dirs:
+            if trace:
+                trace.set_phase("prune_dirs")
+            ignored_dirs = ignored_abs_paths(repo_root, shallow_dirs)
+            ignored_dirs.discard(search_root.resolve())
+
+    def skip_dir(d: Path) -> bool:
+        return d in ignored_dirs or any(d.is_relative_to(ig) for ig in ignored_dirs if ig != d)
+
+    all_files = bounded_walk(
+        search_root,
+        skip_dir=skip_dir if ignored_dirs else None,
+        should_stop=over_budget,
+        on_dir=(lambda d: trace.tick("dirs", path=d.relative_to(workspace).as_posix()) if trace else None),
+    )
+    if trace:
+        trace.tick("files", len(all_files), path=path)
+
+    allowed_set: set[Path] = set()
+    if loc and not over_budget():
+        repo_root, _ = loc
+        if trace:
+            trace.set_phase("classify_ignore")
+        walk_dirs = collect_dirs_under(search_root, max_depth=GATHER_WALK_MAX_DEPTH)
+        allowed_set = classify_repo_files(workspace, repo_root, all_files, walk_dirs)
+        if trace:
+            trace.tick("allowed", len(allowed_set))
+    else:
+        allowed_set = {fp for fp in all_files if check_repo_path(workspace, fp) is None}
+
+    if over_budget():
+        partial_note = "\n\n(partial: soft deadline reached during gather)\n"
+
+    allowed_list = sorted(allowed_set, key=lambda p: p.as_posix().lower())
 
     doc_candidates: list[Path] = []
-    if target.is_file():
+    if target.is_file() and target in allowed_set:
         doc_candidates.append(target)
-    else:
+    elif target.is_dir():
         for name in ("README.md", "README", "README.txt", "ARCHITECTURE.md", "CONTRIBUTING.md"):
             p = target / name
-            if p.is_file() and _repo_path_allowed(workspace, p):
+            if p in allowed_set:
                 doc_candidates.append(p)
 
     api_patterns = ("openapi", "swagger", "graphql")
     doc_suffixes = {".md", ".txt", ".rst"}
     api_suffixes = {".yaml", ".yml", ".json", ".graphql", ".gql"}
 
-    if search_root.is_dir():
-        for fp in bounded_walk(search_root):
-            if not _repo_path_allowed(workspace, fp):
-                continue
-            lower = fp.name.lower()
-            if fp.suffix.lower() in doc_suffixes and fp not in doc_candidates:
-                if fp.parent.name == "docs" or fp.name in {
-                    "README.md", "README", "README.txt", "ARCHITECTURE.md", "CONTRIBUTING.md",
-                }:
-                    doc_candidates.append(fp)
-                    if len(doc_candidates) >= 8:
-                        break
+    if trace:
+        trace.set_phase("docs")
+    for fp in allowed_list:
+        if over_budget():
+            break
+        if fp.suffix.lower() in doc_suffixes and fp not in doc_candidates:
+            if fp.parent.name == "docs" or fp.name in {
+                "README.md", "README", "README.txt", "ARCHITECTURE.md", "CONTRIBUTING.md",
+            }:
+                doc_candidates.append(fp)
+                if trace:
+                    trace.tick("docs", path=fp.relative_to(workspace).as_posix())
+                if len(doc_candidates) >= 8:
+                    break
 
     api_files: list[str] = []
-    if search_root.is_dir():
-        for fp in bounded_walk(search_root):
-            if not _repo_path_allowed(workspace, fp):
-                continue
-            lower = fp.name.lower()
-            if any(p in lower for p in api_patterns) and fp.suffix.lower() in api_suffixes:
-                rel = fp.relative_to(workspace).as_posix()
-                api_files.append(f"### {rel}\n{_excerpt_file(fp, 4000)}\n")
-                if len(api_files) >= 4:
-                    break
+    if trace:
+        trace.set_phase("api_specs")
+    for fp in allowed_list:
+        if over_budget():
+            break
+        lower = fp.name.lower()
+        if any(p in lower for p in api_patterns) and fp.suffix.lower() in api_suffixes:
+            rel = fp.relative_to(workspace).as_posix()
+            body = _excerpt_file(fp, 4000)
+            api_files.append(f"### {rel}\n{body}\n")
+            if trace:
+                trace.tick("api_specs", path=rel)
+            if len(api_files) >= 4:
+                break
 
     if doc_candidates:
         sections.append("## Documentation\n")
@@ -645,10 +760,14 @@ def _gather_context(workspace: Path, path: str) -> str:
         "requirements.txt", "composer.json", "pom.xml",
     )
     manifests: list[str] = []
+    if trace:
+        trace.set_phase("manifests")
     for name in manifest_names:
         fp = search_root / name
-        if fp.is_file() and _repo_path_allowed(workspace, fp):
+        if fp in allowed_set:
             manifests.append(f"### {fp.relative_to(workspace).as_posix()}\n{_excerpt_file(fp, 2000)}\n")
+            if trace:
+                trace.tick("manifests", path=name)
     if manifests:
         sections.append("## Stack manifests\n" + "\n".join(manifests))
 
@@ -656,19 +775,26 @@ def _gather_context(workspace: Path, path: str) -> str:
         sections.append("## API specs\n" + "\n".join(api_files))
 
     tree_root = target if target.is_dir() else target.parent
-    tree_lines = _gather_tree(workspace, tree_root)
+    tree_lines = _gather_tree_from_allowed(workspace, tree_root, allowed_set, trace=trace)
     if tree_lines:
         sections.append("## Directory tree (bounded)\n" + "\n".join(tree_lines))
 
-    out = "\n".join(sections)
+    out = "\n".join(sections) + partial_note
     if len(out) > GATHER_CONTEXT_CAP:
         out = out[:GATHER_CONTEXT_CAP] + "\n...[truncated]"
     return out or f"(no context gathered for {path})"
 
 
 # --- dispatcher (sync; run off-loop by the agent) -------------------------
-def execute_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
+def execute_tool(
+    workspace: Path,
+    name: str,
+    args: dict[str, Any],
+    trace: ToolTrace | None = None,
+) -> str:
     workspace = Path(workspace)
+    token = set_active_trace(trace) if trace else None
+    reset_subprocess_budget(max_calls=1)
     try:
         if name == "read_file":
             return _read_file(
@@ -676,9 +802,10 @@ def execute_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
                 args["path"],
                 args.get("start_line"),
                 args.get("end_line"),
+                trace=trace,
             )
         if name == "list_directory":
-            return _list_directory(workspace, args.get("path", "."))
+            return _list_directory(workspace, args.get("path", "."), trace=trace)
         if name == "write_file":
             return _write_file(workspace, args.get("path", ""), args.get("content", ""))
         if name == "append_eventlog":
@@ -690,16 +817,21 @@ def execute_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
             return _write_tasks(workspace, args["module_id"], args["tasks_json"])
         if name == "grep_repo":
             return _grep_repo(
-                workspace, args["pattern"], args.get("repo"), args.get("glob"), args.get("path"),
+                workspace,
+                args["pattern"],
+                args.get("repo"),
+                args.get("glob"),
+                args.get("path"),
+                trace=trace,
             )
         if name == "run_script":
-            return _run_script(workspace, args["script"], args.get("args"))
+            return _run_script(workspace, args["script"], args.get("args"), trace=trace)
         if name == "web_fetch":
-            return _web_fetch(workspace, args["url"], args["filename"])
+            return _web_fetch(workspace, args["url"], args["filename"], trace=trace)
         if name == "web_search":
             return _web_search(workspace, args["query"])
         if name == "gather_context":
-            return _gather_context(workspace, args["path"])
+            return _gather_context(workspace, args["path"], trace=trace)
         return f"ERROR: unknown tool: {name}"
     except ValueError as exc:  # path escape and similar
         return f"ERROR: {exc}"
@@ -707,6 +839,9 @@ def execute_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:
         return f"ERROR: missing argument {exc}"
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: {exc}"
+    finally:
+        if token is not None:
+            reset_active_trace(token)
 
 
 def execute_readonly_tool(workspace: Path, name: str, args: dict[str, Any]) -> str:

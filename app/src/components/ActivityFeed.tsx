@@ -156,7 +156,38 @@ function FeedEntry({ entry }: { entry: ActivityEntry }) {
           {entry.attempts != null && (
             <span className="ml-2 text-xs text-cf-muted">after {entry.attempts} attempts</span>
           )}
+          {entry.trace && (
+            <p className="mt-1 font-mono text-xs text-cf-muted">
+              {entry.trace.phase}
+              {entry.trace.counters &&
+                Object.entries(entry.trace.counters).map(([k, v]) => ` ${k}=${v}`)}
+              {entry.trace.lastPath ? ` last=${entry.trace.lastPath}` : ""}
+            </p>
+          )}
           {entry.reason && <p className="mt-1 break-all text-xs">{entry.reason}</p>}
+        </div>
+      );
+    case "tool_progress":
+      return (
+        <div className="font-mono text-xs text-cf-muted/90">
+          <span className="uppercase tracking-wide text-cf-info/70">progress</span>
+          <span className="ml-2">{entry.name}</span>
+          {entry.trace && (
+            <span className="ml-2 break-all">
+              {entry.trace.phase}
+              {entry.trace.counters &&
+                Object.entries(entry.trace.counters).map(([k, v]) => ` ${k}=${v}`)}
+              {entry.trace.lastPath ? ` @ ${entry.trace.lastPath}` : ""}
+            </span>
+          )}
+        </div>
+      );
+    case "tool_stall":
+      return (
+        <div className="rounded-md border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-sm text-orange-200">
+          <span className="font-mono text-xs uppercase tracking-wide">tool stall</span>
+          <span className="ml-2 font-mono">{entry.name}</span>
+          {entry.reason && <p className="mt-1 break-all font-mono text-xs">{entry.reason}</p>}
         </div>
       );
     case "item":

@@ -1152,6 +1152,7 @@ fn packs_for(module_id: &str) -> Vec<&'static str> {
         "api-surface-analysis",
         "tech-debt-triage",
         "test-coverage",
+        "lovable-readiness",
     ];
     let sales = [
         "swot-analysis",
@@ -1161,7 +1162,12 @@ fn packs_for(module_id: &str) -> Vec<&'static str> {
         "localization-readiness",
     ];
     let docs = ["accessibility-pass", "onboarding-flow-audit", "documentation-gap-analysis"];
-    let compliance = ["security-analysis", "data-privacy-scan", "licensing-compatibility"];
+    let compliance = [
+        "security-analysis",
+        "data-privacy-scan",
+        "licensing-compatibility",
+        "lovable-readiness",
+    ];
     if engineering.contains(&module_id) {
         packs.push("Engineering");
     }
@@ -1200,6 +1206,9 @@ pub fn get_module_suggestions(install: &Path, id: &str) -> Vec<String> {
         suggested.push("dependency-health".to_string());
         suggested.push("accessibility-pass".to_string());
         suggested.push("api-surface-analysis".to_string());
+    }
+    if has("supabase") || has("supabase/config.toml") {
+        suggested.push("lovable-readiness".to_string());
     }
     match meta.project_type.as_str() {
         "b2b" => suggested.push("b2b-low-hanging-features".to_string()),
@@ -1616,6 +1625,13 @@ mod tests {
     #[test]
     fn packs_for_includes_test_coverage() {
         assert!(packs_for("test-coverage").contains(&"Engineering"));
+    }
+
+    #[test]
+    fn packs_for_lovable_readiness_engineering_and_compliance() {
+        let packs = packs_for("lovable-readiness");
+        assert!(packs.contains(&"Engineering"));
+        assert!(packs.contains(&"Compliance & Risk"));
     }
 
     fn write_minimal_meta(project: &Path, display_name: &str) {

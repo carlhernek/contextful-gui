@@ -26,7 +26,9 @@ DEFAULT_MODELS: dict[str, str] = {
 
 def _write_json(payload: dict[str, Any]) -> None:
     try:
-        sys.stdout.write(json.dumps(payload) + "\n")
+        # default=str so an unexpected non-serializable value degrades to a
+        # string instead of raising TypeError and killing the whole sidecar.
+        sys.stdout.write(json.dumps(payload, default=str) + "\n")
         sys.stdout.flush()
     except (OSError, BrokenPipeError, ValueError):
         # stdout closed (parent quit) -> exit cleanly instead of crashing.

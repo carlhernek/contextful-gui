@@ -1,6 +1,6 @@
 [package]
 name = "contextful"
-version = "1.2.33"
+version = "1.2.34"
 description = "Contextful — agentic project analyzer"
 authors = ["Contextful"]
 edition = "2021"

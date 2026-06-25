@@ -1,6 +1,7 @@
 //! Long-lived Python sidecar manager: spawn, NDJSON request/response, cancellation.
 //! Reference behavior per spec sections 3.2, 3.5, 3.6.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -9,6 +10,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Max sidecar stderr lines retained for crash diagnostics.
+const STDERR_RING_CAP: usize = 200;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
@@ -31,6 +35,7 @@ pub struct SidecarManager {
     events_rx: Mutex<Option<Receiver<Value>>>,
     cancel_flag: Arc<AtomicBool>,
     request_lock: Mutex<()>,
+    stderr_ring: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl SidecarManager {
@@ -42,7 +47,15 @@ impl SidecarManager {
             events_rx: Mutex::new(None),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             request_lock: Mutex::new(()),
+            stderr_ring: Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING_CAP))),
         }
+    }
+
+    /// Snapshot of the most recent sidecar stderr lines (crash diagnostics).
+    fn stderr_tail(&self, max_lines: usize) -> String {
+        let ring = self.stderr_ring.lock().unwrap();
+        let start = ring.len().saturating_sub(max_lines);
+        ring.iter().skip(start).cloned().collect::<Vec<_>>().join("\n")
     }
 
     pub fn start(&self) -> Result<()> {
@@ -70,13 +83,16 @@ impl SidecarManager {
                 .env("PYTHONUTF8", "1")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::inherit());
+                .stderr(Stdio::piped());
             cmd
         } else {
             let mut cmd = Command::new(release_sidecar_path()?);
+            // Capture stderr (was previously discarded) so a sidecar crash —
+            // e.g. a Python traceback or a dyld/codesign failure — is visible
+            // instead of surfacing only as an opaque "sidecar disconnected".
             cmd.stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+                .stderr(Stdio::piped());
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -88,6 +104,7 @@ impl SidecarManager {
 
         let mut child = command.spawn().context("spawn sidecar")?;
         let stdout = child.stdout.take().context("sidecar stdout")?;
+        let stderr = child.stderr.take().context("sidecar stderr")?;
         let stdin = child.stdin.take().context("sidecar stdin")?;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -96,6 +113,22 @@ impl SidecarManager {
                 if let Ok(value) = serde_json::from_str::<Value>(&line) {
                     let _ = tx.send(value); // drop malformed lines silently
                 }
+            }
+        });
+        let ring = self.stderr_ring.clone();
+        {
+            let mut g = ring.lock().unwrap();
+            g.clear();
+        }
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                eprintln!("[sidecar] {line}");
+                let mut g = ring.lock().unwrap();
+                if g.len() == STDERR_RING_CAP {
+                    g.pop_front();
+                }
+                g.push_back(line);
             }
         });
         *self.stdin.lock().unwrap() = Some(stdin);
@@ -193,7 +226,30 @@ impl SidecarManager {
                 }
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(anyhow!("sidecar disconnected"));
+                    // The sidecar's stdout closed — the process died. Drain its
+                    // exit status and recent stderr so the failure is diagnosable.
+                    thread::sleep(Duration::from_millis(50));
+                    let status = self
+                        .child
+                        .lock()
+                        .ok()
+                        .and_then(|mut g| g.as_mut().and_then(|c| c.try_wait().ok().flatten()))
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    // Process is gone; clear handles so the next request respawns it.
+                    *self.stdin.lock().unwrap() = None;
+                    if let Ok(mut g) = self.child.lock() {
+                        *g = None;
+                    }
+                    let tail = self.stderr_tail(30);
+                    let detail = if tail.trim().is_empty() {
+                        "no stderr captured".to_string()
+                    } else {
+                        tail
+                    };
+                    return Err(anyhow!(
+                        "sidecar disconnected (exit: {status})\n--- sidecar stderr (last lines) ---\n{detail}"
+                    ));
                 }
             }
         }

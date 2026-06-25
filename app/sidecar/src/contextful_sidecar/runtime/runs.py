@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from contextful_sidecar.runtime.agent import run_agent
+from contextful_sidecar.runtime.agent_state import clear_agent_state
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.indexing import agentic_reindex
 from contextful_sidecar.runtime.module_config import get_max_turns
@@ -369,10 +370,27 @@ async def _run_workspace_index(
         return "", format_exception(exc)
 
 
+def _is_stuck_or_incomplete(exc: BaseException) -> bool:
+    msg = str(exc).rstrip()
+    return msg.endswith("(stuck)") or msg.endswith("(incomplete)")
+
+
 async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, run_id,
                                   repo_paths, meta_docs, project_type, specific_instructions,
                                   on_event, should_cancel, resume: bool = False) -> tuple[str, str | None]:
+    # When resuming, if a prior run already produced both required artifacts,
+    # treat the module as done instead of re-running it from scratch.
+    out_dir = ws / "runs" / run_id / module_id
+    if resume and (out_dir / "analysis.md").is_file() and (out_dir / "tasks.json").is_file():
+        clear_agent_state(ws, run_id, module_id)
+        append_eventlog(ws, module_id, "SKIP",
+                        "analysis.md and tasks.json already present — not re-running")
+        return f"{role} already complete (artifacts present)", None
+
     attempt = 0
+    # First attempt resumes the saved transcript when resuming a failed/cancelled
+    # run, so already-run turns and file reads are not repeated.
+    resume_checkpoint = resume
     while True:
         try:
             summary = await run_agent(
@@ -380,11 +398,11 @@ async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, r
                 module_id=module_id, run_id=run_id, repo_paths=repo_paths, meta_docs=meta_docs,
                 project_type=project_type, specific_instructions=specific_instructions,
                 on_event=on_event,
-                max_turns=get_max_turns(ws, module_id, resume=resume),
+                max_turns=get_max_turns(ws, module_id, resume=resume_checkpoint),
+                resume_checkpoint=resume_checkpoint,
             )
-            if summary.endswith("(incomplete)"):
+            if summary.rstrip().endswith(("(incomplete)", "(stuck)")):
                 raise RuntimeError(summary)
-            out_dir = ws / "runs" / run_id / module_id
             if not (out_dir / "analysis.md").is_file() or not (out_dir / "tasks.json").is_file():
                 raise RuntimeError(
                     f"{role} finished without analysis.md and tasks.json in runs/{run_id}/{module_id}/"
@@ -395,11 +413,21 @@ async def _run_module_with_retry(*, ws, skill, model, client, role, module_id, r
         except Exception as exc:  # noqa: BLE001
             if should_cancel():
                 return "", "cancelled"
-            if attempt < MAX_MODULE_RETRIES and _is_transient(exc):
+            stuck = _is_stuck_or_incomplete(exc)
+            if attempt < MAX_MODULE_RETRIES and (_is_transient(exc) or stuck):
                 delay = min(RETRY_BASE_DELAY_SEC * (2 ** attempt), RETRY_MAX_DELAY_SEC)
                 attempt += 1
+                # A stuck/incomplete loop won't recover by replaying the same
+                # transcript — restart this module fresh. Transient failures keep
+                # their progress and resume from the checkpoint.
+                if stuck:
+                    clear_agent_state(ws, run_id, module_id)
+                    resume_checkpoint = False
+                else:
+                    resume_checkpoint = True
                 append_eventlog(ws, module_id, "RETRY",
-                                f"attempt {attempt}/{MAX_MODULE_RETRIES} after {delay:.0f}s: {exc}")
+                                f"attempt {attempt}/{MAX_MODULE_RETRIES} after {delay:.0f}s "
+                                f"({'fresh' if stuck else 'resume'}): {exc}")
                 try:
                     await asyncio.sleep(delay)
                 except asyncio.CancelledError:

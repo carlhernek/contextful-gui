@@ -1,11 +1,18 @@
 """Per-module turn-based agent loop (spec section 5)."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Callable
 
 from contextful_sidecar.runtime.activity import append_activity
+from contextful_sidecar.runtime.agent_state import (
+    clear_agent_state,
+    load_agent_state,
+    log_resume,
+    save_agent_state,
+)
 from contextful_sidecar.runtime.agents import compose_module_prompt
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
@@ -21,6 +28,19 @@ EventCallback = Callable[[str, Any], None]
 
 MAX_FETCH_REFUNDS = 20
 
+# --- stuck / no-progress detection ----------------------------------------
+# A turn counts as unproductive when it repeats a previous turn's exact tool
+# calls, re-issues a call that already failed, or produces only errors. After
+# STUCK_NUDGE_AT such turns we inject a strong corrective message; if it keeps
+# going to STUCK_ABORT_AT we abort so the module can be retried fresh.
+STUCK_NUDGE_AT = 3
+STUCK_ABORT_AT = 6
+
+# Per-turn LLM timeout: convert a hung/stalled completion into a retry instead
+# of an indefinite spin. The client also retries transient HTTP internally.
+LLM_TURN_TIMEOUT_SEC = 180.0
+LLM_TURN_RETRIES = 2
+
 
 def _turn_was_only_failed_fetch(tool_calls, results) -> bool:
     if not tool_calls:
@@ -30,6 +50,50 @@ def _turn_was_only_failed_fetch(tool_calls, results) -> bool:
         if name not in ("web_fetch", "web_search") or not result.startswith("ERROR:"):
             return False
     return True
+
+
+def _call_sig(call: dict[str, Any]) -> str:
+    fn = call.get("function") or {}
+    return f"{fn.get('name', '')}:{fn.get('arguments') or '{}'}"
+
+
+def _turn_sig(tool_calls: list[dict[str, Any]]) -> str:
+    return "|".join(sorted(_call_sig(c) for c in tool_calls))
+
+
+async def _chat_with_turn_timeout(workspace, run_id, module_id, **kwargs) -> dict[str, Any]:
+    """Run one LLM turn under a wall-clock timeout, retrying a stalled request.
+
+    Raises a transient-flavoured RuntimeError if every attempt times out, so the
+    module-level retry loop picks it up instead of the agent spinning forever.
+    """
+    for attempt in range(LLM_TURN_RETRIES + 1):
+        try:
+            return await asyncio.wait_for(
+                logged_chat_completion(
+                    workspace=workspace, run_id=run_id, module_id=module_id, **kwargs
+                ),
+                timeout=LLM_TURN_TIMEOUT_SEC,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            log_step(
+                workspace,
+                scope=module_id,
+                status="LLM_TIMEOUT",
+                message=(
+                    f"turn LLM call timed out after {int(LLM_TURN_TIMEOUT_SEC)}s "
+                    f"(attempt {attempt + 1}/{LLM_TURN_RETRIES + 1})"
+                ),
+                run_id=run_id,
+                module_id=module_id,
+                activity_kind="error",
+            )
+            if attempt >= LLM_TURN_RETRIES:
+                raise RuntimeError(
+                    f"LLM turn timed out after {LLM_TURN_RETRIES + 1} attempts "
+                    f"({int(LLM_TURN_TIMEOUT_SEC)}s each)"
+                ) from None
+    raise RuntimeError("LLM turn failed without a response")
 
 
 def _build_system_prompt(*, role, module_id, workspace, repo_paths, meta_docs,
@@ -69,6 +133,7 @@ async def run_agent(
     specific_instructions: str | None = None,
     on_event: EventCallback | None = None,
     max_turns: int = 24,
+    resume_checkpoint: bool = False,
 ) -> str:
     workspace = Path(workspace)
     set_run_context(workspace, run_id)
@@ -79,19 +144,37 @@ async def run_agent(
             "\n\n## Specific Instructions (from user)\n" + specific_instructions.strip() + "\n"
         )
 
-    system_prompt = _build_system_prompt(
-        role=role, module_id=module_id, workspace=workspace, repo_paths=repo_paths,
-        meta_docs=meta_docs, project_type=project_type, skill_text=skill_text,
-    )
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Begin the {role} analysis now."},
-    ]
-
     turn = 0
     fetch_refunds = 0
     wrote_analysis = False
     wrote_tasks = False
+    messages: list[dict[str, Any]] = []
+
+    checkpoint = load_agent_state(workspace, run_id, module_id) if resume_checkpoint else None
+    if checkpoint:
+        messages = checkpoint["messages"]
+        turn = int(checkpoint.get("turn", 0))
+        wrote_analysis = bool(checkpoint.get("wroteAnalysis"))
+        wrote_tasks = bool(checkpoint.get("wroteTasks"))
+        fetch_refunds = int(checkpoint.get("fetchRefunds", 0))
+        log_resume(workspace, module_id, turn, len(messages))
+    else:
+        # Fresh start: drop any stale checkpoint so we never resume by accident.
+        clear_agent_state(workspace, run_id, module_id)
+        system_prompt = _build_system_prompt(
+            role=role, module_id=module_id, workspace=workspace, repo_paths=repo_paths,
+            meta_docs=meta_docs, project_type=project_type, skill_text=skill_text,
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Begin the {role} analysis now."},
+        ]
+
+    # Stuck detection state (not persisted — re-derived per process run).
+    prev_turn_sig: str | None = None
+    failed_call_sigs: set[str] = set()
+    stuck_score = 0
+    stuck_nudged = False
 
     def on_token(tok: str) -> None:
         if on_event:
@@ -121,10 +204,10 @@ async def run_agent(
             maxTurns=max_turns,
         )
 
-        response = await logged_chat_completion(
-            workspace=workspace,
-            run_id=run_id,
-            module_id=module_id,
+        response = await _chat_with_turn_timeout(
+            workspace,
+            run_id,
+            module_id,
             scope=module_id,
             client=client,
             model=model,
@@ -159,10 +242,15 @@ async def run_agent(
             final = content or f"{role} complete."
             append_eventlog(workspace, module_id, "SUCCESS", final.splitlines()[0][:160] if final else "")
             append_activity(workspace, run_id, module_id, "final", turn=turn, text=final)
+            clear_agent_state(workspace, run_id, module_id)
             return final
 
         if on_event:
             on_event("token", "\n\n")
+
+        sig = _turn_sig(tool_calls)
+        dup_turn = sig == prev_turn_sig
+        repeat_failed = False
 
         results: list[str] = []
         for call in tool_calls:
@@ -197,6 +285,11 @@ async def run_agent(
                 module_id=module_id,
             )
             results.append(result)
+            call_sig = _call_sig(call)
+            if result.startswith("ERROR:"):
+                if call_sig in failed_call_sigs:
+                    repeat_failed = True
+                failed_call_sigs.add(call_sig)
             if name == "write_analysis" and not result.startswith("ERROR:"):
                 wrote_analysis = True
             if name == "write_tasks" and not result.startswith("ERROR:"):
@@ -214,11 +307,64 @@ async def run_agent(
                 final.splitlines()[0][:160] if final else "",
             )
             append_activity(workspace, run_id, module_id, "final", turn=turn, text=final)
+            clear_agent_state(workspace, run_id, module_id)
             return final
+
+        # --- stuck / no-progress detection -------------------------------
+        all_failed = bool(results) and all(r.startswith("ERROR:") for r in results)
+        unproductive = dup_turn or repeat_failed or all_failed
+        if unproductive:
+            stuck_score += 1
+        else:
+            stuck_score = 0
+            stuck_nudged = False
+        prev_turn_sig = sig
+
+        if stuck_score >= STUCK_ABORT_AT:
+            err = (
+                f"{role} made no progress for {stuck_score} consecutive turns "
+                "(repeating the same/failing tool calls) (stuck)"
+            )
+            log_step(
+                workspace, scope=module_id, status="STUCK_ABORT", message=err,
+                run_id=run_id, module_id=module_id, activity_kind="error", turn=turn,
+            )
+            return err
+
+        if stuck_score >= STUCK_NUDGE_AT and not stuck_nudged:
+            stuck_nudged = True
+            log_step(
+                workspace, scope=module_id, status="STUCK_NUDGE",
+                message=f"no progress for {stuck_score} turns — injecting corrective guidance",
+                run_id=run_id, module_id=module_id, activity_kind="turn", turn=turn,
+            )
+            missing = []
+            if not wrote_analysis:
+                missing.append("write_analysis")
+            if not wrote_tasks:
+                missing.append("write_tasks")
+            messages.append({
+                "role": "user",
+                "content": (
+                    "STOP. You are repeating the same tool calls and making no progress. "
+                    "Do NOT retry a tool call that already failed (e.g. run_script only runs "
+                    ".py files; do not re-run shell scripts). Change approach: rely on the "
+                    "context you already have and "
+                    + (f"call {' and '.join(missing)} now" if missing else "finish now")
+                    + " with grounded findings. Use tools — do not reply with text only."
+                ),
+            })
 
         if _turn_was_only_failed_fetch(tool_calls, results) and fetch_refunds < MAX_FETCH_REFUNDS:
             fetch_refunds += 1
             turn -= 1
+
+        save_agent_state(
+            workspace, run_id, module_id,
+            turn=turn, messages=messages,
+            wrote_analysis=wrote_analysis, wrote_tasks=wrote_tasks,
+            fetch_refunds=fetch_refunds,
+        )
 
     err = f"{role} stopped after {max_turns} turns (incomplete)"
     log_step(

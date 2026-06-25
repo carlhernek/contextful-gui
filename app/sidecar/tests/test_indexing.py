@@ -20,6 +20,31 @@ from contextful_sidecar.runtime.indexing import (
 from contextful_sidecar.runtime.tools import execute_readonly_tool
 
 
+def test_scan_items_includes_supabase_snapshots(tmp_path: Path):
+    ws = tmp_path / "project"
+    ws.mkdir()
+    (ws / ".contextful.json").write_text(
+        json.dumps({"display_name": "demo", "project_type": "both", "repos": []}),
+        encoding="utf-8",
+    )
+    sub = ws / "supabase" / "prod"
+    sub.mkdir(parents=True)
+    (sub / "meta.json").write_text(json.dumps({"ref": "abc", "region": "eu-central-1"}), encoding="utf-8")
+    (sub / "advisors_security.json").write_text(json.dumps({"lints": []}), encoding="utf-8")
+
+    items = scan_items(ws, include_artifacts=False)
+    sb = [i for i in items if i["type"] == "supabase"]
+    ids = {i["id"] for i in sb}
+    assert ids == {"supabase:prod/advisors_security.json", "supabase:prod/meta.json"}
+    assert sb[0]["meta"]["connection"] == "prod"
+
+    doc = build_index_document(ws, [
+        {**i, "description": "", "keywords": []} for i in sb
+    ])
+    prompt = format_index_for_prompt(doc)
+    assert "Supabase config snapshots:" in prompt
+
+
 class FakeClient:
     async def chat_completion(self, *, model, messages, tools=None, on_token=None):
         _ = model, tools, on_token

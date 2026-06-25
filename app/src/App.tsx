@@ -5,7 +5,7 @@ import { ProjectSidebar } from "./components/ProjectSidebar";
 import { PipelineTab } from "./components/PipelineTab";
 import { ChatPanel } from "./components/ChatPanel";
 import { MetaDocumentsTab } from "./components/MetaDocumentsTab";
-import { RepositoriesTab } from "./components/RepositoriesTab";
+import { ConnectionsTab } from "./components/ConnectionsTab";
 import { RunHistory } from "./components/RunHistory";
 import { ResultsView } from "./components/ResultsView";
 import { EventLogPanel } from "./components/EventLogPanel";
@@ -22,7 +22,7 @@ const TAB_LABELS: Record<Tab, string> = {
   chat: "Chat",
   pipeline: "Pipeline",
   meta: "Meta documents",
-  repos: "Repositories",
+  repos: "Connections",
   results: "Results",
   logs: "Logs",
 };
@@ -165,7 +165,7 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
           ) : tab === "meta" ? (
             <MetaDocumentsTab projectId={active.id} />
           ) : tab === "repos" ? (
-            <RepositoriesTab projectId={active.id} />
+            <ConnectionsTab projectId={active.id} />
           ) : tab === "results" ? (
             <div className="mx-auto grid max-w-5xl grid-cols-[260px_minmax(0,1fr)] gap-4">
               <RunHistory

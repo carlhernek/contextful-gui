@@ -13,6 +13,10 @@ from contextful_sidecar.runtime.indexing import refresh_index
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.preview import preview_file
 from contextful_sidecar.runtime.runs import load_run_state, run_modules
+from contextful_sidecar.runtime.supabase import (
+    list_projects as supabase_list_projects,
+    snapshot as supabase_snapshot,
+)
 
 DEFAULT_MODELS: dict[str, str] = {
     "orchestrator": "deepseek/deepseek-v4-flash",
@@ -92,6 +96,21 @@ class SidecarServer:
                 if not self.client:
                     return {"id": req_id, "error": "not configured"}
                 return {"id": req_id, "result": {"models": await self.client.list_models()}}
+            # Supabase Management API calls do not use the OpenRouter client.
+            if method == "list_supabase_projects":
+                projects = await supabase_list_projects(params.get("pat", ""))
+                return {"id": req_id, "result": {"projects": projects}}
+            if method == "snapshot_supabase":
+                result = await supabase_snapshot(
+                    pat=params.get("pat", ""),
+                    project_ref=params.get("projectRef", ""),
+                    name=params.get("name", ""),
+                    region=params.get("region"),
+                    status=params.get("status"),
+                    workspace=params.get("workspace", ""),
+                    subdir=params.get("subdir", ""),
+                )
+                return {"id": req_id, "result": result}
             if not self.client:
                 return {"id": req_id, "error": "not configured"}
             workspace = params.get("workspace", "")

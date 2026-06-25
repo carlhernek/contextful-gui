@@ -299,6 +299,41 @@ def _scan_repo_item(workspace: Path, repo: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _scan_supabase_items(workspace: Path) -> list[dict[str, Any]]:
+    """One index entry per supabase/<subdir>/*.json snapshot artifact."""
+    items: list[dict[str, Any]] = []
+    sb_dir = workspace / "supabase"
+    if not sb_dir.is_dir():
+        return items
+    try:
+        subdirs = sorted((p for p in sb_dir.iterdir() if p.is_dir()), key=lambda p: p.name.lower())
+    except OSError:
+        return items
+    for sub in subdirs:
+        try:
+            files = sorted((p for p in sub.iterdir() if p.is_file() and p.suffix == ".json"),
+                           key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for fp in files:
+            fields = _meta_file_fields(fp)
+            if fields is None:
+                continue
+            content_hash, snippet, size = fields
+            rel = fp.relative_to(workspace).as_posix()
+            items.append({
+                "id": f"supabase:{sub.name}/{fp.name}",
+                "type": "supabase",
+                "path": rel,
+                "name": fp.name,
+                "meta": {"connection": sub.name, "size": size},
+                "entries": [],
+                "contentHash": content_hash,
+                "snippet": snippet,
+            })
+    return items
+
+
 def _scan_meta_item(workspace: Path, meta_dir: Path, fp: Path) -> dict[str, Any]:
     rel = fp.relative_to(workspace).as_posix()
     rel_meta = fp.relative_to(meta_dir).as_posix()
@@ -479,6 +514,15 @@ async def scan_items_async(
     else:
         trace.record("meta_missing", path=str(meta_dir))
 
+    supabase_items = await asyncio.to_thread(_scan_supabase_items, ws)
+    for item in supabase_items:
+        if should_cancel():
+            raise asyncio.CancelledError()
+        items.append(item)
+        trace.record("supabase_done", itemId=item["id"], size=item["meta"].get("size"))
+        _log_item("SCAN_ITEM", f"supabase {item['name']}", item, ms=0)
+        await asyncio.sleep(0)
+
     if include_artifacts:
         artifact_items = await asyncio.to_thread(_scan_artifact_items, ws)
         for item in artifact_items:
@@ -554,6 +598,8 @@ def scan_items(workspace: Path, *, include_artifacts: bool = True) -> list[dict[
                 items.append(_scan_meta_item(workspace, meta_dir, fp))
             except OSError:
                 continue
+
+    items.extend(_scan_supabase_items(workspace))
 
     if include_artifacts:
         items.extend(_scan_artifact_items(workspace))
@@ -1133,7 +1179,7 @@ def format_index_for_prompt(index: dict[str, Any]) -> str:
         return "Workspace index: (empty — run refresh or add repos/meta documents)\n"
 
     lines = ["Workspace index:"]
-    by_type: dict[str, list[dict[str, Any]]] = {"repo": [], "meta": [], "artifact": []}
+    by_type: dict[str, list[dict[str, Any]]] = {"repo": [], "meta": [], "supabase": [], "artifact": []}
     for item in items:
         t = item.get("type", "")
         if t in by_type:
@@ -1156,6 +1202,15 @@ def format_index_for_prompt(index: dict[str, Any]) -> str:
     if by_type["meta"]:
         lines.append("\nMeta documents:")
         for it in by_type["meta"][:40]:
+            kw = ", ".join(it.get("keywords") or [])
+            lines.append(
+                f"  - {it['path']}: {it.get('description', '')}"
+                + (f" [{kw}]" if kw else "")
+            )
+
+    if by_type["supabase"]:
+        lines.append("\nSupabase config snapshots:")
+        for it in by_type["supabase"][:40]:
             kw = ", ".join(it.get("keywords") or [])
             lines.append(
                 f"  - {it['path']}: {it.get('description', '')}"

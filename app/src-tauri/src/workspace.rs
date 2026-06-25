@@ -41,6 +41,18 @@ fn default_branch() -> String {
     "main".to_string()
 }
 
+/// A connected Supabase project (Management API). No secret is stored here —
+/// the PAT lives in the OS keychain; only the resolved project identity does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupabaseConnection {
+    pub name: String,
+    pub project_ref: String,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub last_snapshot_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectMeta {
     pub display_name: String,
@@ -48,6 +60,8 @@ pub struct ProjectMeta {
     pub project_type: String,
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
+    #[serde(default)]
+    pub supabase: Vec<SupabaseConnection>,
     #[serde(default)]
     pub models: serde_json::Map<String, Value>,
     #[serde(default)]
@@ -66,6 +80,7 @@ impl ProjectMeta {
             display_name: display_name.to_string(),
             project_type: default_project_type(),
             repos: Vec::new(),
+            supabase: Vec::new(),
             models: serde_json::Map::new(),
             selected_modules: Vec::new(),
             deleted: false,
@@ -319,6 +334,7 @@ fn maybe_harden_cloned_repos(project: &Path, meta: &ProjectMeta) {
 /// Non-destructive touch when opening a project (lazy migration hooks).
 pub fn touch_project(project: &Path) {
     let _ = fs::create_dir_all(project.join("meta"));
+    let _ = fs::create_dir_all(project.join("supabase"));
     if let Ok(meta) = read_meta(project) {
         maybe_harden_cloned_repos(project, &meta);
     }
@@ -377,7 +393,7 @@ pub fn create_project(install: &Path, id: &str, display_name: &str) -> Result<Pa
 }
 
 fn init_workspace_dirs(project: &Path) -> Result<()> {
-    for sub in ["repos", "meta", "research", RUN_STATE_DIR] {
+    for sub in ["repos", "meta", "research", "supabase", RUN_STATE_DIR] {
         fs::create_dir_all(project.join(sub)).with_context(|| format!("mkdir {sub}"))?;
     }
     let eventlog = project.join(".eventlog");
@@ -794,6 +810,98 @@ pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
     let ok_count = results.iter().filter(|r| r["ok"].as_bool() == Some(true)).count();
     append_git_batch_summary(&project, "pull", ok_count, meta.repos.len());
     Ok(json!({"results": results}))
+}
+
+// --- supabase connections (Management API) --------------------------------
+/// Stable, filesystem-safe subdirectory name for a connection's snapshot.
+pub fn supabase_subdir(name: &str) -> String {
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() { "project".to_string() } else { slug }
+}
+
+pub fn add_supabase(
+    install: &Path,
+    id: &str,
+    name: &str,
+    project_ref: &str,
+    region: Option<&str>,
+) -> Result<()> {
+    let project = project_dir(install, id);
+    let mut meta = read_meta(&project)?;
+    if meta.supabase.iter().any(|c| c.project_ref == project_ref) {
+        bail!("a Supabase connection for ref '{project_ref}' already exists");
+    }
+    meta.supabase.push(SupabaseConnection {
+        name: name.to_string(),
+        project_ref: project_ref.to_string(),
+        region: region.map(|s| s.to_string()),
+        last_snapshot_at: None,
+    });
+    write_meta(&project, &meta)
+}
+
+pub fn remove_supabase(install: &Path, id: &str, project_ref: &str) -> Result<()> {
+    let project = project_dir(install, id);
+    let mut meta = read_meta(&project)?;
+    let removed: Vec<SupabaseConnection> =
+        meta.supabase.iter().filter(|c| c.project_ref == project_ref).cloned().collect();
+    meta.supabase.retain(|c| c.project_ref != project_ref);
+    write_meta(&project, &meta)?;
+    for conn in removed {
+        let dir = project.join("supabase").join(supabase_subdir(&conn.name));
+        if dir.exists() {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+    Ok(())
+}
+
+pub fn list_supabase(install: &Path, id: &str) -> Result<Vec<Value>> {
+    let project = project_dir(install, id);
+    touch_project(&project);
+    let meta = read_meta(&project)?;
+    Ok(meta
+        .supabase
+        .into_iter()
+        .map(|c| {
+            let subdir = supabase_subdir(&c.name);
+            let snapshot_present = project.join("supabase").join(&subdir).join("meta.json").exists();
+            json!({
+                "name": c.name,
+                "project_ref": c.project_ref,
+                "region": c.region,
+                "lastSnapshotAt": c.last_snapshot_at,
+                "subdir": subdir,
+                "snapshotPresent": snapshot_present,
+            })
+        })
+        .collect())
+}
+
+/// Record a successful snapshot timestamp (and region, if newly resolved).
+pub fn mark_supabase_snapshot(
+    install: &Path,
+    id: &str,
+    project_ref: &str,
+    region: Option<&str>,
+) -> Result<()> {
+    let project = project_dir(install, id);
+    let mut meta = read_meta(&project)?;
+    let now = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    for conn in meta.supabase.iter_mut() {
+        if conn.project_ref == project_ref {
+            conn.last_snapshot_at = Some(now.clone());
+            if region.is_some() {
+                conn.region = region.map(|s| s.to_string());
+            }
+        }
+    }
+    write_meta(&project, &meta)
 }
 
 // --- meta docs ------------------------------------------------------------
@@ -1646,6 +1754,7 @@ mod tests {
                     url: String::new(),
                     branch: "main".to_string(),
                 }],
+                supabase: Vec::new(),
                 models: serde_json::Map::new(),
                 selected_modules: Vec::new(),
                 deleted: false,
@@ -1697,6 +1806,45 @@ mod tests {
             vec!["security-analysis".to_string(), "accessibility-pass".to_string()]
         );
         assert_eq!(get_module_selection(install, "p1"), saved);
+    }
+
+    #[test]
+    fn supabase_subdir_slugifies() {
+        assert_eq!(supabase_subdir("My App (prod)"), "my-app--prod");
+        assert_eq!(supabase_subdir("  "), "project");
+        assert_eq!(supabase_subdir("abcdEFGH1234"), "abcdefgh1234");
+    }
+
+    #[test]
+    fn supabase_add_list_remove_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        write_minimal_meta(&project, "P1");
+
+        add_supabase(install, "p1", "Prod", "abcdefghijklmnopqrst", Some("eu-central-1")).unwrap();
+        let listed = list_supabase(install, "p1").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["project_ref"], "abcdefghijklmnopqrst");
+        assert_eq!(listed[0]["region"], "eu-central-1");
+        assert_eq!(listed[0]["snapshotPresent"], false);
+
+        // duplicate ref rejected
+        assert!(add_supabase(install, "p1", "Prod2", "abcdefghijklmnopqrst", None).is_err());
+
+        // snapshot marker present after writing meta.json into the subdir
+        let subdir = supabase_subdir("Prod");
+        let snap_dir = project.join("supabase").join(&subdir);
+        fs::create_dir_all(&snap_dir).unwrap();
+        fs::write(snap_dir.join("meta.json"), "{}").unwrap();
+        mark_supabase_snapshot(install, "p1", "abcdefghijklmnopqrst", None).unwrap();
+        let listed = list_supabase(install, "p1").unwrap();
+        assert_eq!(listed[0]["snapshotPresent"], true);
+        assert!(listed[0]["lastSnapshotAt"].is_string());
+
+        remove_supabase(install, "p1", "abcdefghijklmnopqrst").unwrap();
+        assert!(list_supabase(install, "p1").unwrap().is_empty());
+        assert!(!snap_dir.exists());
     }
 
     #[test]

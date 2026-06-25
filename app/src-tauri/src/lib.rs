@@ -189,6 +189,156 @@ fn clear_git_credential(app: AppHandle, host: String) -> CmdResult<()> {
     settings::save_settings(&app, &s).map_err(err)
 }
 
+// ===== supabase (Management API connections) ==============================
+#[tauri::command]
+fn set_supabase_token(token: String) -> CmdResult<()> {
+    secrets::save_supabase_pat(&token).map_err(err)
+}
+
+#[tauri::command]
+fn clear_supabase_token() -> CmdResult<()> {
+    secrets::delete_supabase_pat().map_err(err)
+}
+
+#[tauri::command]
+fn stored_supabase_token_masked() -> CmdResult<Option<String>> {
+    secrets::masked_supabase_pat().map_err(err)
+}
+
+/// Load the stored PAT and ask the sidecar for the account's project list.
+#[tauri::command]
+async fn list_supabase_projects(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Value> {
+    let pat = secrets::load_supabase_pat()
+        .map_err(err)?
+        .unwrap_or_default();
+    if pat.trim().is_empty() {
+        return Err("no Supabase token configured".into());
+    }
+    rpc(app, state.sidecar.clone(), "list_supabase_projects", json!({ "pat": pat })).await
+}
+
+#[tauri::command]
+fn add_supabase(
+    app: AppHandle,
+    id: String,
+    name: String,
+    project_ref: String,
+    region: Option<String>,
+) -> CmdResult<()> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    workspace::add_supabase(&install, &id, &name, &project_ref, region.as_deref()).map_err(|e| {
+        log_project_error(&project, "supabase", &format!("add connection {name} failed — {e}"));
+        err(e)
+    })?;
+    workspace::append_eventlog(
+        &project,
+        "supabase",
+        "SUCCESS",
+        &format!("added connection {name} ({project_ref})"),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_supabase(app: AppHandle, id: String, project_ref: String) -> CmdResult<()> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    workspace::remove_supabase(&install, &id, &project_ref).map_err(|e| {
+        log_project_error(&project, "supabase", &format!("remove connection {project_ref} failed — {e}"));
+        err(e)
+    })?;
+    workspace::append_eventlog(
+        &project,
+        "supabase",
+        "SUCCESS",
+        &format!("removed connection {project_ref}"),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn list_supabase(app: AppHandle, id: String) -> CmdResult<Vec<Value>> {
+    let install = install_path(&app)?;
+    workspace::list_supabase(&install, &id).map_err(err)
+}
+
+/// Snapshot one connection's configuration via the Management API (sidecar).
+#[tauri::command]
+async fn snapshot_supabase(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    project_ref: String,
+) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    let pat = secrets::load_supabase_pat()
+        .map_err(err)?
+        .unwrap_or_default();
+    if pat.trim().is_empty() {
+        return Err("no Supabase token configured".into());
+    }
+    let meta = workspace::read_meta(&project).map_err(err)?;
+    let conn = meta
+        .supabase
+        .iter()
+        .find(|c| c.project_ref == project_ref)
+        .cloned()
+        .ok_or_else(|| "no such Supabase connection".to_string())?;
+    let subdir = workspace::supabase_subdir(&conn.name);
+    let workspace = project.to_string_lossy().to_string();
+
+    let guard = state
+        .jobs
+        .try_begin(
+            &app,
+            &project,
+            JobKind::Snapshot,
+            &id,
+            &format!("Snapshotting {}", conn.name),
+        )
+        .map_err(|busy| reject_job_busy(&app, &id, "snapshot", busy))?;
+
+    let result = rpc(
+        app.clone(),
+        state.sidecar.clone(),
+        "snapshot_supabase",
+        json!({
+            "pat": pat,
+            "projectRef": project_ref,
+            "name": conn.name,
+            "region": conn.region,
+            "status": Value::Null,
+            "workspace": workspace,
+            "subdir": subdir,
+        }),
+    )
+    .await;
+
+    match &result {
+        Err(e) => {
+            guard.fail_with("supabase", &format!("snapshot {} failed — {e}", conn.name));
+        }
+        Ok(_) => {
+            let _ = workspace::mark_supabase_snapshot(
+                &install,
+                &id,
+                &project_ref,
+                conn.region.as_deref(),
+            );
+            workspace::append_eventlog(
+                &project,
+                "supabase",
+                "SUCCESS",
+                &format!("snapshot written for {} ({project_ref})", conn.name),
+            );
+        }
+    }
+    drop(guard);
+    result
+}
+
 // ===== settings & models ==================================================
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Value {
@@ -837,6 +987,14 @@ pub fn run() {
             list_git_credential_hosts,
             set_git_credential,
             clear_git_credential,
+            set_supabase_token,
+            clear_supabase_token,
+            stored_supabase_token_masked,
+            list_supabase_projects,
+            add_supabase,
+            remove_supabase,
+            list_supabase,
+            snapshot_supabase,
             get_settings,
             set_models,
             list_models,

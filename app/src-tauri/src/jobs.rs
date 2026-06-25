@@ -19,6 +19,7 @@ pub enum JobKind {
     Index,
     Clone,
     Pull,
+    Snapshot,
 }
 
 impl JobKind {
@@ -28,6 +29,7 @@ impl JobKind {
             JobKind::Index => "index",
             JobKind::Clone => "clone",
             JobKind::Pull => "pull",
+            JobKind::Snapshot => "snapshot",
         }
     }
 }

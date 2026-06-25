@@ -52,6 +52,26 @@ export interface GitCredentialHost {
   username?: string | null;
 }
 
+/** A project returned by the Supabase Management API project list. */
+export interface SupabaseProject {
+  ref: string;
+  name: string;
+  region?: string | null;
+  status?: string | null;
+  created_at?: string | null;
+  organization_id?: string | null;
+}
+
+/** A persisted Supabase connection (no secret stored here). */
+export interface SupabaseConnection {
+  name: string;
+  project_ref: string;
+  region?: string | null;
+  lastSnapshotAt?: string | null;
+  subdir: string;
+  snapshotPresent: boolean;
+}
+
 export interface MetaEntry {
   name: string;
   path: string;
@@ -206,7 +226,7 @@ export interface WorkspaceIndex {
 
 export interface JobInfo {
   key: string;
-  kind: "run" | "index" | "clone" | "pull";
+  kind: "run" | "index" | "clone" | "pull" | "snapshot";
   projectId: string;
   label: string;
   startedAt: string;
@@ -236,6 +256,22 @@ export const api = {
   setGitCredential: (host: string, token: string, username?: string) =>
     invoke<void>("set_git_credential", { host, token, username: username || null }),
   clearGitCredential: (host: string) => invoke<void>("clear_git_credential", { host }),
+
+  setSupabaseToken: (token: string) => invoke<void>("set_supabase_token", { token }),
+  clearSupabaseToken: () => invoke<void>("clear_supabase_token"),
+  storedSupabaseTokenMasked: () => invoke<string | null>("stored_supabase_token_masked"),
+  listSupabaseProjects: () =>
+    invoke<{ projects: SupabaseProject[] }>("list_supabase_projects"),
+  addSupabase: (id: string, name: string, projectRef: string, region?: string | null) =>
+    invoke<void>("add_supabase", { id, name, projectRef, region: region ?? null }),
+  removeSupabase: (id: string, projectRef: string) =>
+    invoke<void>("remove_supabase", { id, projectRef }),
+  listSupabase: (id: string) => invoke<SupabaseConnection[]>("list_supabase", { id }),
+  snapshotSupabase: (id: string, projectRef: string) =>
+    invoke<{ written: string[]; skipped: { path: string; reason: string }[]; region?: string | null }>(
+      "snapshot_supabase",
+      { id, projectRef },
+    ),
 
   getSettings: () => invoke<SetupStatus>("get_settings"),
   setModels: (projectId: string, models: Record<string, string>) =>

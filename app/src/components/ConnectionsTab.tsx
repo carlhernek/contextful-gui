@@ -4,8 +4,9 @@ import { missingPatHosts } from "../lib/gitRepoAuth";
 import { useJob } from "../lib/jobs";
 import { IndexButton } from "./IndexButton";
 import { Spinner } from "./Spinner";
+import { SupabaseConnectionsPanel } from "./SupabaseConnectionsPanel";
 
-export function RepositoriesTab({ projectId }: { projectId: string }) {
+export function ConnectionsTab({ projectId }: { projectId: string }) {
   const [repos, setRepos] = useState<RepoStatus[]>([]);
   const [credHosts, setCredHosts] = useState<GitCredentialHost[]>([]);
   const [name, setName] = useState("");
@@ -142,13 +143,14 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
 
   return (
     <div className="mx-auto max-w-4xl rounded-lg border border-cf-border bg-cf-surface p-4">
+      <h3 className="mb-3 font-semibold text-cf-ink">Git repositories</h3>
       <div className="mb-3 rounded-md border border-cf-border bg-cf-surface-2 px-3 py-2 text-xs text-cf-muted">
         Target repositories are read-only mirrors — push is disabled. Private HTTPS remotes (e.g.
         Azure DevOps) need a Personal Access Token stored below; SSH remotes use your system SSH
         keys.
       </div>
 
-      <h3 className="mb-2 font-semibold text-cf-ink">Git credentials (HTTPS)</h3>
+      <h4 className="mb-2 text-sm font-semibold text-cf-ink">Git credentials (HTTPS)</h4>
       <div className="mb-4 rounded-md border border-cf-border bg-cf-surface-2 p-3">
         <p className="mb-2 text-xs text-cf-muted">
           Tokens are stored in the OS keychain. For Azure DevOps, click <strong>Generate Git
@@ -223,7 +225,7 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
         )}
       </div>
 
-      <h3 className="mb-3 font-semibold text-cf-ink">Project repositories</h3>
+      <h4 className="mb-3 text-sm font-semibold text-cf-ink">Project repositories</h4>
 
       <div className="mb-3 grid grid-cols-[1fr_2fr_auto_auto] gap-2">
         <input
@@ -324,6 +326,8 @@ export function RepositoriesTab({ projectId }: { projectId: string }) {
       )}
 
       {error && <pre className="mt-3 whitespace-pre-wrap text-xs text-cf-danger">{error}</pre>}
+
+      <SupabaseConnectionsPanel projectId={projectId} />
     </div>
   );
 }

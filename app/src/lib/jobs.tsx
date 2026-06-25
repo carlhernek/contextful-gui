@@ -9,7 +9,7 @@ import {
 } from "react";
 import { api, onContextfulEvent, type SidecarEvent } from "./ipc";
 
-export type JobKind = "run" | "index" | "clone" | "pull";
+export type JobKind = "run" | "index" | "clone" | "pull" | "snapshot";
 
 export interface Job {
   key: string;

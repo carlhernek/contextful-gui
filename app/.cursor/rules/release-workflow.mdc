@@ -5,6 +5,25 @@ alwaysApply: true
 
 # Release workflow (always on — do not ask)
 
+## Ultra-verbose logging is mandatory
+
+Everything built in Contextful MUST include ultra-verbose logging, in the same
+manner already used across the codebase:
+
+- **Sidecar (Python):** use `log_step(...)` / `append_eventlog(...)` to the
+  workspace `.eventlog` (scope = the feature area, e.g. `"supabase"`). Log a
+  START, every external request/response (with HTTP status, timing in ms, and
+  bytes written), each skip/fallback with its reason, and a final SUCCESS/ERROR
+  summary with counts and total duration.
+- **Rust (Tauri):** use `workspace::append_eventlog(...)` / `log_project_error`
+  with START on entry and SUCCESS/ERROR on exit for every command that does work.
+- **Never log secrets.** Tokens, PATs, API keys, and passwords must never reach
+  a log — reference presence/length/prefix only (e.g. `tokenLen=…`).
+
+If you add or change a feature without this level of logging, it is incomplete.
+
+## Build / release sequence
+
 After completing any meaningful feature or fix in this repo, run this full
 sequence autonomously. Do **not** stop to ask for confirmation at any step.
 

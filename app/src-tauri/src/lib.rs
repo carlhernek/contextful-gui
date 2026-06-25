@@ -223,14 +223,41 @@ fn stored_supabase_token_masked() -> CmdResult<Option<String>> {
 
 /// Load the stored PAT and ask the sidecar for the account's project list.
 #[tauri::command]
-async fn list_supabase_projects(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Value> {
+async fn list_supabase_projects(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
     let pat = secrets::load_supabase_pat()
         .map_err(err)?
         .unwrap_or_default();
     if pat.trim().is_empty() {
         return Err("no Supabase token configured".into());
     }
-    rpc(app, state.sidecar.clone(), "list_supabase_projects", json!({ "pat": pat })).await
+    let workspace = project.to_string_lossy().to_string();
+    workspace::append_eventlog(&project, "supabase", "START", "listing account projects");
+    let result = rpc(
+        app,
+        state.sidecar.clone(),
+        "list_supabase_projects",
+        json!({ "pat": pat, "workspace": workspace }),
+    )
+    .await;
+    match &result {
+        Err(e) => log_project_error(&project, "supabase", &format!("list projects failed — {e}")),
+        Ok(v) => {
+            let count = v.get("projects").and_then(|p| p.as_array()).map(|a| a.len()).unwrap_or(0);
+            workspace::append_eventlog(
+                &project,
+                "supabase",
+                "SUCCESS",
+                &format!("listed {count} account project(s)"),
+            );
+        }
+    }
+    result
 }
 
 #[tauri::command]

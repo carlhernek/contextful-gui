@@ -66,7 +66,7 @@ export function SupabaseConnectionsPanel({ projectId }: { projectId: string }) {
     setLoadingProjects(true);
     setError(null);
     try {
-      const res = await api.listSupabaseProjects();
+      const res = await api.listSupabaseProjects(projectId);
       setProjects(res.projects);
       setChecked({});
     } catch (e) {

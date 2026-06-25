@@ -44,7 +44,7 @@ wheels = [
 
 [[package]]
 name = "contextful-sidecar"
-version = "1.2.32"
+version = "1.2.33"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },

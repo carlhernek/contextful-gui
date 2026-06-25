@@ -123,6 +123,25 @@ def test_snapshot_writes_artifacts_and_skips_missing_advisors(monkeypatch, tmp_p
     assert meta["region"] == "eu-central-1"
     assert "auth.json" in meta["written"]
 
+    # Ultra-verbose logging: snapshot writes a START + per-endpoint + SUCCESS
+    # trail to the workspace .eventlog, and never leaks the token value.
+    eventlog = (tmp_path / ".eventlog").read_text()
+    assert "supabase START" in eventlog
+    assert "snapshot DONE" in eventlog
+    assert "config/auth" in eventlog
+    assert "api keys redacted" in eventlog
+    assert "sbp_token" not in eventlog  # PAT must never be logged
+
+
+def test_list_projects_logs_without_leaking_token(monkeypatch, tmp_path: Path):
+    fake = _FakeClient({"/projects": _resp(200, [{"id": "abc123", "name": "Prod"}])})
+    monkeypatch.setattr(supabase.httpx, "AsyncClient", fake)
+    asyncio.run(supabase.list_projects("sbp_secret", workspace=str(tmp_path)))
+    eventlog = (tmp_path / ".eventlog").read_text()
+    assert "list_projects" in eventlog
+    assert "1 project(s) returned" in eventlog
+    assert "sbp_secret" not in eventlog  # PAT must never be logged
+
 
 def test_list_projects_rejects_bad_token(monkeypatch):
     fake = _FakeClient({"/projects": _resp(401)})

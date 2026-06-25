@@ -98,7 +98,10 @@ class SidecarServer:
                 return {"id": req_id, "result": {"models": await self.client.list_models()}}
             # Supabase Management API calls do not use the OpenRouter client.
             if method == "list_supabase_projects":
-                projects = await supabase_list_projects(params.get("pat", ""))
+                projects = await supabase_list_projects(
+                    params.get("pat", ""),
+                    workspace=params.get("workspace") or None,
+                )
                 return {"id": req_id, "result": {"projects": projects}}
             if method == "snapshot_supabase":
                 result = await supabase_snapshot(

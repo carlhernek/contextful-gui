@@ -271,8 +271,8 @@ export const api = {
   setSupabaseToken: (token: string) => invoke<void>("set_supabase_token", { token }),
   clearSupabaseToken: () => invoke<void>("clear_supabase_token"),
   storedSupabaseTokenMasked: () => invoke<string | null>("stored_supabase_token_masked"),
-  listSupabaseProjects: () =>
-    invoke<{ projects: SupabaseProject[] }>("list_supabase_projects"),
+  listSupabaseProjects: (id: string) =>
+    invoke<{ projects: SupabaseProject[] }>("list_supabase_projects", { id }),
   addSupabase: (id: string, name: string, projectRef: string, region?: string | null) =>
     invoke<void>("add_supabase", { id, name, projectRef, region: region ?? null }),
   removeSupabase: (id: string, projectRef: string) =>

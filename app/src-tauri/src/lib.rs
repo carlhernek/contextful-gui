@@ -1,6 +1,7 @@
 //! Contextful Tauri core: command surface + app wiring (spec section 10).
 
 mod git_credentials;
+mod github_cli;
 mod indexing;
 mod jobs;
 mod prereqs;
@@ -187,6 +188,21 @@ fn clear_git_credential(app: AppHandle, host: String) -> CmdResult<()> {
     let mut s = settings::load_settings(&app).unwrap_or_default();
     s.git_credential_hosts.retain(|h| h != &host);
     settings::save_settings(&app, &s).map_err(err)
+}
+
+// ===== github cli (preferred for github.com HTTPS) =======================
+#[tauri::command]
+async fn github_cli_status() -> github_cli::GithubCliStatus {
+    tauri::async_runtime::spawn_blocking(github_cli::status)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn setup_github_cli_git() -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(github_cli::setup_git)
+        .await
+        .map_err(err)?
 }
 
 // ===== supabase (Management API connections) ==============================
@@ -987,6 +1003,8 @@ pub fn run() {
             list_git_credential_hosts,
             set_git_credential,
             clear_git_credential,
+            github_cli_status,
+            setup_github_cli_git,
             set_supabase_token,
             clear_supabase_token,
             stored_supabase_token_masked,

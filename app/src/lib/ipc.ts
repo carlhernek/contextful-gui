@@ -52,6 +52,14 @@ export interface GitCredentialHost {
   username?: string | null;
 }
 
+export interface GithubCliStatus {
+  installed: boolean;
+  authenticated: boolean;
+  login: string | null;
+  gitConfigured: boolean;
+  ghPath: string | null;
+}
+
 /** A project returned by the Supabase Management API project list. */
 export interface SupabaseProject {
   ref: string;
@@ -256,6 +264,9 @@ export const api = {
   setGitCredential: (host: string, token: string, username?: string) =>
     invoke<void>("set_git_credential", { host, token, username: username || null }),
   clearGitCredential: (host: string) => invoke<void>("clear_git_credential", { host }),
+
+  githubCliStatus: () => invoke<GithubCliStatus>("github_cli_status"),
+  setupGithubCliGit: () => invoke<string>("setup_github_cli_git"),
 
   setSupabaseToken: (token: string) => invoke<void>("set_supabase_token", { token }),
   clearSupabaseToken: () => invoke<void>("clear_supabase_token"),

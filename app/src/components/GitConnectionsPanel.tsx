@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type GitCredentialHost, type RepoStatus } from "../lib/ipc";
+import {
+  api,
+  type GitCredentialHost,
+  type GithubCliStatus,
+  type RepoStatus,
+} from "../lib/ipc";
 import { missingPatHosts } from "../lib/gitRepoAuth";
 import {
   GIT_PROVIDERS,
@@ -25,6 +30,10 @@ export function GitConnectionsPanel({ projectId }: { projectId: string }) {
   const [credUsername, setCredUsername] = useState("");
   const [credToken, setCredToken] = useState("");
   const [credBusy, setCredBusy] = useState(false);
+  const [ghStatus, setGhStatus] = useState<GithubCliStatus | null>(null);
+  const [ghLoading, setGhLoading] = useState(false);
+  const [ghSetupBusy, setGhSetupBusy] = useState(false);
+  const [showGithubPat, setShowGithubPat] = useState(false);
   const { busy: cloneBusy } = useJob("clone", projectId);
   const { busy: pullBusy } = useJob("pull", projectId);
   const { isBusy } = useJob(undefined, projectId);
@@ -72,6 +81,38 @@ export function GitConnectionsPanel({ projectId }: { projectId: string }) {
     const current = credHosts.find((h) => h.host === effectiveHost);
     setCredUsername(current?.username ?? "");
   }, [effectiveHost, credHosts]);
+
+  const refreshGhStatus = async () => {
+    setGhLoading(true);
+    try {
+      setGhStatus(await api.githubCliStatus());
+    } catch {
+      setGhStatus(null);
+    } finally {
+      setGhLoading(false);
+    }
+  };
+
+  // Detect GitHub CLI auth lazily the first time the GitHub tab is opened.
+  useEffect(() => {
+    if (activeProvider === "github" && ghStatus === null && !ghLoading) {
+      void refreshGhStatus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProvider]);
+
+  const setupGhGit = async () => {
+    setGhSetupBusy(true);
+    setError(null);
+    try {
+      await api.setupGithubCliGit();
+      await refreshGhStatus();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setGhSetupBusy(false);
+    }
+  };
 
   const add = async () => {
     if (!name.trim() || !url.trim()) return;
@@ -163,6 +204,15 @@ export function GitConnectionsPanel({ projectId }: { projectId: string }) {
     }
   };
 
+  const ghAuthed = activeProvider === "github" && ghStatus?.authenticated === true;
+  const showCredForm = activeProvider !== "github" || !ghAuthed || showGithubPat;
+  const credHeading =
+    activeProvider !== "github"
+      ? `${provider.label} credentials (HTTPS)`
+      : ghAuthed
+        ? "GitHub Personal Access Token (optional fallback)"
+        : "GitHub Personal Access Token";
+
   return (
     <div>
       <h3 className="mb-3 font-semibold text-cf-ink">Git repositories</h3>
@@ -192,7 +242,21 @@ export function GitConnectionsPanel({ projectId }: { projectId: string }) {
         })}
       </div>
 
-      <h4 className="mb-2 text-sm font-semibold text-cf-ink">{provider.label} credentials (HTTPS)</h4>
+      {activeProvider === "github" && (
+        <GithubCliBanner
+          status={ghStatus}
+          loading={ghLoading}
+          setupBusy={ghSetupBusy}
+          onRecheck={() => void refreshGhStatus()}
+          onSetupGit={() => void setupGhGit()}
+          showPat={showGithubPat}
+          onTogglePat={() => setShowGithubPat((v) => !v)}
+        />
+      )}
+
+      {showCredForm && (
+        <>
+      <h4 className="mb-2 text-sm font-semibold text-cf-ink">{credHeading}</h4>
       <div className="mb-4 rounded-md border border-cf-border bg-cf-surface-2 p-3">
         <p className="mb-2 text-xs text-cf-muted">{providerHelp(activeProvider)}</p>
         <div className="mb-2 flex flex-wrap gap-2">
@@ -279,6 +343,8 @@ export function GitConnectionsPanel({ projectId }: { projectId: string }) {
           </div>
         )}
       </div>
+        </>
+      )}
 
       <h4 className="mb-3 text-sm font-semibold text-cf-ink">{provider.label} repositories</h4>
 
@@ -397,10 +463,102 @@ export function GitConnectionsPanel({ projectId }: { projectId: string }) {
   );
 }
 
+function GithubCliBanner({
+  status,
+  loading,
+  setupBusy,
+  onRecheck,
+  onSetupGit,
+  showPat,
+  onTogglePat,
+}: {
+  status: GithubCliStatus | null;
+  loading: boolean;
+  setupBusy: boolean;
+  onRecheck: () => void;
+  onSetupGit: () => void;
+  showPat: boolean;
+  onTogglePat: () => void;
+}) {
+  const recheck = (
+    <button
+      type="button"
+      className="text-cf-info hover:underline disabled:opacity-40"
+      onClick={onRecheck}
+      disabled={loading}
+    >
+      {loading ? <Spinner size={10} /> : "Recheck"}
+    </button>
+  );
+
+  if (loading && !status) {
+    return (
+      <div className="mb-4 flex items-center gap-2 rounded-md border border-cf-border bg-cf-surface-2 px-3 py-2 text-xs text-cf-muted">
+        <Spinner size={12} /> Checking for the GitHub CLI…
+      </div>
+    );
+  }
+
+  if (status?.authenticated) {
+    return (
+      <div className="mb-4 rounded-md border border-cf-border bg-cf-surface-2 p-3">
+        <p className="text-sm text-cf-success">
+          Connected to GitHub as{" "}
+          <span className="font-mono">@{status.login ?? "your account"}</span> via the GitHub CLI —
+          no token needed for HTTPS.
+        </p>
+        {!status.gitConfigured && (
+          <div className="mt-2 text-xs text-cf-muted">
+            <p className="mb-1 text-cf-danger">
+              git is not yet wired to the GitHub CLI, so private HTTPS clones may fail.
+            </p>
+            <button
+              type="button"
+              className="rounded-md bg-cf-accent px-3 py-1.5 text-sm font-medium text-cf-accent-ink hover:opacity-90 disabled:opacity-40"
+              onClick={onSetupGit}
+              disabled={setupBusy}
+            >
+              {setupBusy ? <Spinner size={12} /> : "Set up git integration"}
+            </button>
+            <span className="ml-2">(runs gh auth setup-git)</span>
+          </div>
+        )}
+        <p className="mt-2 text-xs text-cf-muted">
+          {recheck} ·{" "}
+          <button type="button" className="text-cf-info hover:underline" onClick={onTogglePat}>
+            {showPat ? "Hide token field" : "Use a Personal Access Token instead"}
+          </button>
+        </p>
+      </div>
+    );
+  }
+
+  const installed = status?.installed === true;
+  return (
+    <div className="mb-4 rounded-md border border-cf-border bg-cf-surface-2 p-3 text-xs text-cf-muted">
+      <p className="mb-1 text-sm text-cf-ink">Recommended: connect with the GitHub CLI</p>
+      {installed ? (
+        <p>
+          The GitHub CLI is installed but not logged in. Run{" "}
+          <span className="font-mono">gh auth login</span> in a terminal (choose HTTPS and "yes" to
+          authenticate git), then {recheck}. No token is stored in Contextful this way.
+        </p>
+      ) : (
+        <p>
+          The GitHub CLI was not detected. Install it (e.g.{" "}
+          <span className="font-mono">brew install gh</span>) and run{" "}
+          <span className="font-mono">gh auth login</span>, then {recheck}. Preferred over a stored
+          token. Otherwise, use a Personal Access Token below.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function providerHelp(id: GitProviderId): string {
   switch (id) {
     case "github":
-      return "Stored in the OS keychain. Create a Personal Access Token with repo (read) scope and save it here — GitHub uses the token as the password, so no username is needed.";
+      return "Only needed if you are not using the GitHub CLI. Create a Personal Access Token with repo (read) scope and save it here — GitHub uses the token as the password, so no username is needed.";
     case "azure":
       return "Stored in the OS keychain. On the repo's Clone page click Generate Git Credentials, then save the generated password as the token and your Azure DevOps organization username (Azure requires the username for HTTPS pulls).";
     case "custom":

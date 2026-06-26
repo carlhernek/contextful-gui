@@ -10,6 +10,7 @@ The audio bytes and the OpenRouter API key are never logged.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -20,10 +21,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from contextful_sidecar.runtime.file_text import AUDIO_EXTENSIONS
+from contextful_sidecar.runtime.guard import run_guarded
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.step_log import log_step
 
 EventCallback = Callable[[str, Any], None]
+CancelCheck = Callable[[], bool]
 
 _SCOPE = "transcription"
 MANIFEST_REL = "meta/.transcripts.json"
@@ -96,21 +99,37 @@ async def _transcribe_wav_in_chunks(
     language: str | None,
     workspace: Path,
     rel: str,
+    on_event: EventCallback,
+    should_cancel: CancelCheck | None = None,
 ) -> str:
     """Transcribe an oversized WAV by splitting it into sub-cap segments.
 
-    Each segment is transcribed independently and the texts are concatenated in
-    order. Raises if any segment fails so the caller marks the file failed.
+    Each segment is transcribed independently (under the shared timeout+retry
+    guard) and the texts are concatenated in order. A per-chunk progress event
+    (and a heartbeat on each retry) is emitted so the outer watchdog sees
+    liveness during long multi-chunk files. Raises if any segment fails so the
+    caller marks the file failed.
     """
     chunks = list(_iter_wav_chunks(fp, _CHUNK_TARGET_BYTES))
     total = len(chunks)
     _log(workspace, "REQUEST", f"{rel} split into {total} chunk(s) for transcription")
     parts: list[str] = []
     for idx, blob in enumerate(chunks, start=1):
+        if should_cancel and should_cancel():
+            raise asyncio.CancelledError()
         audio_b64 = base64.b64encode(blob).decode("ascii")
         _log(workspace, "REQUEST", f"{rel} chunk {idx}/{total} -> STT bytes={len(blob)}")
-        text = await client.transcribe(
-            model=model, audio_b64=audio_b64, fmt="wav", language=language
+        on_event("transcribe", {"path": rel, "status": "chunk", "chunk": idx, "total": total})
+        text = await run_guarded(
+            lambda b64=audio_b64: client.transcribe(
+                model=model, audio_b64=b64, fmt="wav", language=language
+            ),
+            label=f"transcribe {rel} chunk {idx}/{total}",
+            scope=_SCOPE,
+            workspace=workspace,
+            heartbeat=lambda m: on_event(
+                "transcribe", {"path": rel, "status": "retry", "chunk": idx, "detail": m}
+            ),
         )
         parts.append(text.strip())
         _log(
@@ -222,14 +241,18 @@ async def transcribe_pending(
     model: str,
     language: str | None = None,
     on_event: EventCallback | None = None,
+    should_cancel: CancelCheck | None = None,
 ) -> dict[str, Any]:
     """Transcribe audio meta documents that have not been processed before.
 
-    Returns a summary: ``{transcribed, skipped, failed}``.
+    Each STT call runs under the shared timeout+retry guard; a file that
+    exhausts its retries is recorded as failed and skipped so the rest still
+    process. Returns a summary: ``{transcribed, skipped, failed}``.
     """
     workspace = Path(workspace)
     meta_dir = workspace / "meta"
     on_event = on_event or (lambda _e, _d: None)
+    should_cancel = should_cancel or (lambda: False)
     manifest = _load_manifest(workspace)
     entries = manifest.setdefault("entries", {})
 
@@ -246,6 +269,8 @@ async def transcribe_pending(
     )
 
     for fp in audio_files:
+        if should_cancel():
+            raise asyncio.CancelledError()
         rel = fp.relative_to(workspace).as_posix()
         content_hash = _safe_hash(fp)
         transcript = _transcript_path(fp)
@@ -288,18 +313,30 @@ async def transcribe_pending(
                     language=language,
                     workspace=workspace,
                     rel=rel,
+                    on_event=on_event,
+                    should_cancel=should_cancel,
                 )
             else:
                 _log(workspace, "REQUEST", f"{rel} -> STT model={model} fmt={fmt} bytes={size}")
                 raw = fp.read_bytes()
                 audio_b64 = base64.b64encode(raw).decode("ascii")
-                text = await client.transcribe(
-                    model=model, audio_b64=audio_b64, fmt=fmt, language=language
+                text = await run_guarded(
+                    lambda b64=audio_b64: client.transcribe(
+                        model=model, audio_b64=b64, fmt=fmt, language=language
+                    ),
+                    label=f"transcribe {rel}",
+                    scope=_SCOPE,
+                    workspace=workspace,
+                    heartbeat=lambda m: on_event(
+                        "transcribe", {"path": rel, "status": "retry", "detail": m}
+                    ),
                 )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             reason = str(exc) or type(exc).__name__
             failed.append({"path": rel, "reason": reason})
-            _log(workspace, "ERROR", f"{rel} transcription failed — {reason}")
+            _log(workspace, "ERROR", f"{rel} transcription failed — skipping ({reason})")
             on_event("transcribe", {"path": rel, "status": "error"})
             continue
 

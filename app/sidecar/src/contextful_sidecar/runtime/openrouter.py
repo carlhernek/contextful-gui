@@ -59,10 +59,14 @@ class OpenRouterClient:
         if language:
             body["language"] = language
 
+        # Explicit per-phase caps so a stalled read/write trips well under the
+        # 180s wall-clock guard wrapping this call, instead of relying on a
+        # single coarse timeout (which has been observed not to fire).
+        stt_timeout = httpx.Timeout(connect=15.0, read=150.0, write=150.0, pool=15.0)
         last_exc: BaseException | None = None
         for attempt in range(LLM_MAX_RETRIES + 1):
             try:
-                async with httpx.AsyncClient(verify=certifi.where(), timeout=300) as c:
+                async with httpx.AsyncClient(verify=certifi.where(), timeout=stt_timeout) as c:
                     r = await c.post(
                         f"{OPENROUTER_BASE}/audio/transcriptions",
                         headers=self.headers,

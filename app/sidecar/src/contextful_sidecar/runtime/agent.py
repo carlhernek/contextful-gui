@@ -1,7 +1,6 @@
 """Per-module turn-based agent loop (spec section 5)."""
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +14,7 @@ from contextful_sidecar.runtime.agent_state import (
 )
 from contextful_sidecar.runtime.agents import compose_module_prompt
 from contextful_sidecar.runtime.eventlog import append_eventlog
+from contextful_sidecar.runtime.guard import run_guarded
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.step_log import log_step, logged_chat_completion
 from contextful_sidecar.runtime.tool_runner import cap_tool_message, run_tool_with_liveness
@@ -62,38 +62,23 @@ def _turn_sig(tool_calls: list[dict[str, Any]]) -> str:
 
 
 async def _chat_with_turn_timeout(workspace, run_id, module_id, **kwargs) -> dict[str, Any]:
-    """Run one LLM turn under a wall-clock timeout, retrying a stalled request.
+    """Run one LLM turn under the shared wall-clock timeout+retry guard.
 
     Raises a transient-flavoured RuntimeError if every attempt times out, so the
     module-level retry loop picks it up instead of the agent spinning forever.
     """
-    for attempt in range(LLM_TURN_RETRIES + 1):
-        try:
-            return await asyncio.wait_for(
-                logged_chat_completion(
-                    workspace=workspace, run_id=run_id, module_id=module_id, **kwargs
-                ),
-                timeout=LLM_TURN_TIMEOUT_SEC,
-            )
-        except (asyncio.TimeoutError, TimeoutError):
-            log_step(
-                workspace,
-                scope=module_id,
-                status="LLM_TIMEOUT",
-                message=(
-                    f"turn LLM call timed out after {int(LLM_TURN_TIMEOUT_SEC)}s "
-                    f"(attempt {attempt + 1}/{LLM_TURN_RETRIES + 1})"
-                ),
-                run_id=run_id,
-                module_id=module_id,
-                activity_kind="error",
-            )
-            if attempt >= LLM_TURN_RETRIES:
-                raise RuntimeError(
-                    f"LLM turn timed out after {LLM_TURN_RETRIES + 1} attempts "
-                    f"({int(LLM_TURN_TIMEOUT_SEC)}s each)"
-                ) from None
-    raise RuntimeError("LLM turn failed without a response")
+    return await run_guarded(
+        lambda: logged_chat_completion(
+            workspace=workspace, run_id=run_id, module_id=module_id, **kwargs
+        ),
+        label=f"{module_id} LLM turn",
+        scope=module_id,
+        workspace=workspace,
+        timeout_sec=LLM_TURN_TIMEOUT_SEC,
+        retries=LLM_TURN_RETRIES,
+        run_id=run_id,
+        module_id=module_id,
+    )
 
 
 def _build_system_prompt(*, role, module_id, workspace, repo_paths, meta_docs,

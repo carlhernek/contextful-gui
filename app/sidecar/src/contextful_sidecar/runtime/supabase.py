@@ -18,10 +18,13 @@ from typing import Any
 import certifi
 import httpx
 
+from contextful_sidecar.runtime.guard import run_guarded
 from contextful_sidecar.runtime.step_log import log_step
 
 MGMT_BASE = "https://api.supabase.com/v1"
 _TIMEOUT = 30
+# Wall-clock guard per Management API GET (retried on timeout/transient error).
+_GUARD_TIMEOUT_SEC = 60.0
 _SCOPE = "supabase"
 
 
@@ -68,7 +71,13 @@ async def list_projects(pat: str, workspace: str | Path | None = None) -> list[d
     t0 = time.monotonic()
     async with httpx.AsyncClient(verify=certifi.where(), timeout=_TIMEOUT) as c:
         try:
-            r = await c.get(url, headers=_headers(pat))
+            r = await run_guarded(
+                lambda: c.get(url, headers=_headers(pat)),
+                label="supabase list_projects",
+                scope=_SCOPE,
+                workspace=Path(workspace) if workspace else None,
+                timeout_sec=_GUARD_TIMEOUT_SEC,
+            )
         except httpx.HTTPError as exc:
             ms = int((time.monotonic() - t0) * 1000)
             _log(workspace, "ERROR", f"list_projects request error after {ms}ms — {exc}")
@@ -197,8 +206,14 @@ async def snapshot(
             _log(workspace, "REQUEST", f"[{idx}/{total}] GET projects/{project_ref}/{path}")
             t0 = time.monotonic()
             try:
-                r = await c.get(url, headers=headers)
-            except httpx.HTTPError as exc:
+                r = await run_guarded(
+                    lambda u=url: c.get(u, headers=headers),
+                    label=f"supabase GET {path}",
+                    scope=_SCOPE,
+                    workspace=Path(workspace) if workspace else None,
+                    timeout_sec=_GUARD_TIMEOUT_SEC,
+                )
+            except (httpx.HTTPError, RuntimeError) as exc:
                 ms = int((time.monotonic() - t0) * 1000)
                 reason = f"request error: {exc}"
                 skipped.append({"path": path, "reason": reason})

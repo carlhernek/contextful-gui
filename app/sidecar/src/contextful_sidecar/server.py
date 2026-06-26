@@ -177,6 +177,7 @@ class SidecarServer:
                     or DEFAULT_MODELS["transcription"],
                     language=params.get("language") or None,
                     on_event=lambda ev, data: self._emit_event(req_id, ev, data),
+                    should_cancel=self.should_cancel,
                 )
                 # Standalone module "includes indexing": pull the freshly written
                 # transcripts (and any other changes) into the workspace index.

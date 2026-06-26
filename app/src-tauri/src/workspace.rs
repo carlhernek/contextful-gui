@@ -1,8 +1,12 @@
 //! Workspace, git worktrees, target-repo cloning, and module distribution (spec section 8).
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -245,6 +249,53 @@ fn git_command() -> Command {
     cmd
 }
 
+/// Wall-clock cap for any git subprocess so a wedged network clone/pull (which
+/// `git`'s own timers don't always cover) can't hang the app forever.
+const GIT_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Run a spawned command to completion but kill it (and fail) if it exceeds
+/// `timeout`. Stdout/stderr are drained on background threads so a full pipe
+/// buffer can't deadlock the wait.
+fn output_with_timeout(mut cmd: Command, timeout: Duration, label: &str) -> Result<std::process::Output> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().with_context(|| format!("spawn {label}"))?;
+
+    let drain = |pipe: Option<Box<dyn Read + Send>>| -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel();
+        if let Some(mut p) = pipe {
+            thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = p.read_to_end(&mut buf);
+                let _ = tx.send(buf);
+            });
+        } else {
+            let _ = tx.send(Vec::new());
+        }
+        rx
+    };
+    let out_rx = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err_rx = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().with_context(|| format!("wait {label}"))? {
+            Some(status) => break status,
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("{label} timed out after {}s; killed", timeout.as_secs());
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+
+    let stdout = out_rx.recv().unwrap_or_default();
+    let stderr = err_rx.recv().unwrap_or_default();
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
 fn git_run(args: &[&str], cwd: &Path) -> Result<String> {
     git_run_authed(args, cwd, None)
 }
@@ -254,11 +305,8 @@ fn git_run_authed(args: &[&str], cwd: &Path, auth_url: Option<&str>) -> Result<S
     if let Some(url) = auth_url {
         append_git_auth(&mut cmd, url);
     }
-    let output = cmd
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("run git {args:?}"))?;
+    cmd.args(args).current_dir(cwd);
+    let output = output_with_timeout(cmd, GIT_TIMEOUT, &format!("git {args:?}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git {args:?} failed: {stderr}");

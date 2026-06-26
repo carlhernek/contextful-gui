@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
-from contextful_sidecar.runtime import supabase
+from contextful_sidecar.runtime import guard, supabase
 
 
 def _resp(status: int, payload=None) -> httpx.Response:
@@ -141,6 +142,35 @@ def test_list_projects_logs_without_leaking_token(monkeypatch, tmp_path: Path):
     assert "list_projects" in eventlog
     assert "1 project(s) returned" in eventlog
     assert "sbp_secret" not in eventlog  # PAT must never be logged
+
+
+class _HangingClient:
+    """A client whose GET never returns, to exercise the guard timeout."""
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def get(self, url: str, headers=None):
+        await asyncio.sleep(10)
+
+
+def test_list_projects_times_out_under_guard(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(supabase.httpx, "AsyncClient", _HangingClient())
+    monkeypatch.setattr(supabase, "_GUARD_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(guard, "GUARD_RETRY_BASE_DELAY_SEC", 0.0)
+    monkeypatch.setattr(guard, "GUARD_RETRY_MAX_DELAY_SEC", 0.0)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        asyncio.run(supabase.list_projects("sbp_token", workspace=str(tmp_path)))
+
+    eventlog = (tmp_path / ".eventlog").read_text()
+    assert "supabase TIMEOUT" in eventlog
 
 
 def test_list_projects_rejects_bad_token(monkeypatch):

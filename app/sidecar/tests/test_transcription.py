@@ -7,7 +7,9 @@ import json
 import wave
 from pathlib import Path
 
-from contextful_sidecar.runtime import transcription
+import pytest
+
+from contextful_sidecar.runtime import guard, transcription
 
 
 class FakeSTTClient:
@@ -170,6 +172,81 @@ def test_oversized_non_wav_reports_clear_reason(tmp_path: Path, monkeypatch):
     assert len(result["failed"]) == 1
     assert "convert to WAV" in result["failed"][0]["reason"]
     assert client.calls == []  # never uploaded
+
+
+class HangThenSkipClient:
+    """Hangs (until the guard times out) on audio containing a marker; else ok."""
+
+    def __init__(self, hang_marker: bytes, text: str = "good") -> None:
+        self.hang_marker = hang_marker
+        self.text = text
+        self.calls: list[str] = []
+
+    async def transcribe(self, *, model, audio_b64, fmt, language=None):
+        self.calls.append(fmt)
+        if self.hang_marker in base64.b64decode(audio_b64):
+            await asyncio.sleep(10)  # cut short by the wall-clock guard
+        return self.text
+
+
+def _fast_guard(monkeypatch, timeout_sec: float = 0.05) -> None:
+    """Force transcription's guard to a tiny timeout with no retry backoff."""
+    real = guard.run_guarded
+
+    async def fast(factory, **kw):
+        kw["timeout_sec"] = timeout_sec
+        return await real(factory, **kw)
+
+    monkeypatch.setattr(transcription, "run_guarded", fast)
+    monkeypatch.setattr(guard, "GUARD_RETRY_BASE_DELAY_SEC", 0.0)
+    monkeypatch.setattr(guard, "GUARD_RETRY_MAX_DELAY_SEC", 0.0)
+
+
+def test_hung_file_is_skipped_and_others_continue(tmp_path: Path, monkeypatch):
+    _fast_guard(monkeypatch)
+    ws = tmp_path / "project"
+    marker = b"\xaa\xbb\xaa\xbb"
+    # a_hang sorts first and contains the marker so its STT call always hangs.
+    _make_audio(ws, "meta/audio/a_hang.wav", b"RIFFhead" + marker * 4)
+    _make_audio(ws, "meta/audio/b_good.wav", b"RIFFhead-clean-bytes")
+
+    client = HangThenSkipClient(marker)
+    result = asyncio.run(
+        transcription.transcribe_pending(workspace=ws, client=client, model="m")
+    )
+
+    # The hung file exhausts retries and is skipped; the good file still runs.
+    assert result["transcribed"] == ["meta/audio/b_good.wav"]
+    assert [f["path"] for f in result["failed"]] == ["meta/audio/a_hang.wav"]
+    assert "timed out" in result["failed"][0]["reason"]
+
+    log = (ws / ".eventlog").read_text()
+    assert "transcription TIMEOUT" in log
+    assert "transcription RETRY" in log
+
+
+def test_cancel_between_chunks_stops_cleanly(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(transcription, "MAX_AUDIO_BYTES", 1000)
+    monkeypatch.setattr(transcription, "_CHUNK_TARGET_BYTES", 400)
+    ws = tmp_path / "project"
+    _make_wav(ws / "meta/audio/big.wav", frames=4000)
+
+    checks = {"n": 0}
+
+    def should_cancel() -> bool:
+        checks["n"] += 1
+        # Allow the first chunk, then request cancel before the second.
+        return checks["n"] >= 3
+
+    client = FakeSTTClient("part")
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            transcription.transcribe_pending(
+                workspace=ws, client=client, model="m", should_cancel=should_cancel
+            )
+        )
+    # Stopped mid-file, not all chunks transcribed.
+    assert len(client.calls) >= 1
 
 
 def test_list_audio_reports_status(tmp_path: Path):

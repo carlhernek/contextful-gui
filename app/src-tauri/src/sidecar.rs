@@ -9,10 +9,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Max sidecar stderr lines retained for crash diagnostics.
 const STDERR_RING_CAP: usize = 200;
+
+/// Outermost watchdog: if the sidecar emits no event/result for this long, the
+/// operation is treated as stalled, cancelled, and surfaced as a diagnosable
+/// error. Kept above the sidecar's own 180s per-unit guard (+ retry heartbeats)
+/// so legitimate retries are never mistaken for a freeze.
+const IDLE_WATCHDOG: Duration = Duration::from_secs(240);
 
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
@@ -189,9 +195,21 @@ impl SidecarManager {
         let rx_guard = self.events_rx.lock().unwrap();
         let rx = rx_guard.as_ref().context("sidecar not running")?;
 
+        let mut last_activity = Instant::now();
         loop {
             if self.cancel_flag.load(Ordering::SeqCst) {
                 return Err(anyhow!("cancelled"));
+            }
+            if last_activity.elapsed() >= IDLE_WATCHDOG {
+                // No progress for the watchdog window: tell the sidecar to
+                // cancel its active task and fail this request diagnosably
+                // rather than letting the UI freeze. Pipeline resume can pick
+                // up from the last checkpoint.
+                let secs = IDLE_WATCHDOG.as_secs();
+                self.cancel();
+                return Err(anyhow!(
+                    "operation '{method}' stalled — no progress from sidecar for {secs}s; cancelled"
+                ));
             }
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(value) => {
@@ -203,6 +221,7 @@ impl SidecarManager {
                     if !id_matches {
                         continue; // stale event from a previous/cancelled request
                     }
+                    last_activity = Instant::now();
                     if let Some(event) = value.get("event").and_then(Value::as_str) {
                         let _ = app.emit(
                             EVENT_NAME,
@@ -283,4 +302,25 @@ fn release_sidecar_path() -> Result<PathBuf> {
         }
     }
     Err(anyhow!("sidecar binary not found in {}", dir.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sidecar's inner per-unit wall-clock guard (runtime/guard.py).
+    const SIDECAR_UNIT_GUARD_SECS: u64 = 180;
+
+    #[test]
+    fn idle_watchdog_exceeds_inner_guard() {
+        // The outer watchdog must sit above the inner per-unit guard so a
+        // legitimate retry (which heartbeats every <=180s) never trips it; only
+        // a truly wedged sidecar that emits nothing for the full window does.
+        assert!(
+            IDLE_WATCHDOG.as_secs() > SIDECAR_UNIT_GUARD_SECS,
+            "idle watchdog ({}s) must exceed the inner unit guard ({}s)",
+            IDLE_WATCHDOG.as_secs(),
+            SIDECAR_UNIT_GUARD_SECS,
+        );
+    }
 }

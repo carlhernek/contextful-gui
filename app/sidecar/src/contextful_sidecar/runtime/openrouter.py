@@ -39,6 +39,69 @@ class OpenRouterClient:
             r.raise_for_status()
             return r.json().get("data", [])
 
+    async def transcribe(
+        self,
+        *,
+        model: str,
+        audio_b64: str,
+        fmt: str,
+        language: str | None = None,
+    ) -> str:
+        """Transcribe base64-encoded audio via OpenRouter's STT endpoint.
+
+        POSTs to ``/audio/transcriptions`` and returns the transcribed text.
+        The audio payload and API key are never logged here.
+        """
+        body: dict[str, Any] = {
+            "model": model,
+            "input_audio": {"data": audio_b64, "format": fmt},
+        }
+        if language:
+            body["language"] = language
+
+        last_exc: BaseException | None = None
+        for attempt in range(LLM_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(verify=certifi.where(), timeout=300) as c:
+                    r = await c.post(
+                        f"{OPENROUTER_BASE}/audio/transcriptions",
+                        headers=self.headers,
+                        json=body,
+                    )
+                    if r.status_code in _TRANSIENT_HTTP and attempt < LLM_MAX_RETRIES:
+                        await self._backoff(attempt)
+                        continue
+                    r.raise_for_status()
+                    data = r.json()
+                text = data.get("text")
+                if not isinstance(text, str):
+                    raise RuntimeError("OpenRouter transcription response missing 'text'")
+                return text
+            except httpx.HTTPStatusError as exc:
+                detail = ""
+                try:
+                    detail = (exc.response.text or "")[:500].strip()
+                except Exception:  # noqa: BLE001
+                    pass
+                last_exc = (
+                    RuntimeError(f"OpenRouter HTTP {exc.response.status_code}: {detail}")
+                    if detail
+                    else exc
+                )
+                if exc.response.status_code in _TRANSIENT_HTTP and attempt < LLM_MAX_RETRIES:
+                    await self._backoff(attempt)
+                    continue
+                raise last_exc
+            except (httpx.TransportError, httpx.ReadTimeout, asyncio.TimeoutError) as exc:
+                last_exc = exc
+                if attempt < LLM_MAX_RETRIES and is_transient_exception(exc):
+                    await self._backoff(attempt)
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("transcription failed without response")
+
     async def chat_completion(
         self,
         *,

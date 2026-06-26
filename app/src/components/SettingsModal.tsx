@@ -25,6 +25,7 @@ export function SettingsModal({
   const [models, setModels] = useState<Record<string, string>>({
     orchestrator: "deepseek/deepseek-v4-flash",
     module: "deepseek/deepseek-v4-flash",
+    transcription: "openai/whisper-large-v3",
   });
   const [modules, setModules] = useState<ModuleInfo[]>([]);
   const [type, setType] = useState(projectType);
@@ -91,7 +92,7 @@ export function SettingsModal({
         </div>
 
         <div className="space-y-3">
-          {(["orchestrator", "module"] as const).map((role) => (
+          {(["orchestrator", "module", "transcription"] as const).map((role) => (
             <div key={role}>
               <label className="mb-1 block text-xs text-cf-muted">{role}</label>
               <ModelCombobox

@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from contextful_sidecar.runtime.file_text import is_binary_path, read_text_snippet, repo_scan_snippet
+from contextful_sidecar.runtime.file_text import (
+    is_audio_path,
+    is_binary_path,
+    read_text_snippet,
+    repo_scan_snippet,
+)
 from contextful_sidecar.runtime.eventlog import append_eventlog
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
 from contextful_sidecar.runtime.step_log import log_step
@@ -228,6 +233,10 @@ def _iter_meta_files(meta_dir: Path) -> list[Path]:
             if child.is_dir():
                 stack.append(child)
             elif child.is_file():
+                # Raw audio is excluded from the index in favor of its transcript
+                # (a sibling .transcript.md, which is indexed as a normal meta doc).
+                if is_audio_path(child):
+                    continue
                 out.append(child)
                 if len(out) >= META_FILE_CAP:
                     break

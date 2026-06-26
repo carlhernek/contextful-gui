@@ -382,6 +382,85 @@ async fn snapshot_supabase(
     result
 }
 
+// ===== audio transcription ================================================
+const AUDIO_PICK_EXTENSIONS: &[&str] =
+    &["mp3", "wav", "m4a", "ogg", "flac", "aac", "aiff", "webm"];
+
+/// Pick audio files via a native dialog and copy them into `meta/audio/`.
+#[tauri::command]
+async fn add_audio_files(app: AppHandle, id: String) -> CmdResult<Vec<String>> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("Audio", AUDIO_PICK_EXTENSIONS)
+        .blocking_pick_files();
+    let Some(files) = picked else {
+        return Ok(Vec::new());
+    };
+    let sources: Vec<String> = files.into_iter().map(|p| p.to_string()).collect();
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let uploaded = workspace::upload_meta_files(&install, &id, &sources, "audio").map_err(|e| {
+        log_project_error(&project, "transcription", &format!("add audio failed — {e}"));
+        err(e)
+    })?;
+    workspace::append_eventlog(
+        &project,
+        "transcription",
+        "SUCCESS",
+        &format!("added {} audio file(s): {}", uploaded.len(), uploaded.join(", ")),
+    );
+    Ok(uploaded)
+}
+
+/// List audio meta documents and their transcription status (filesystem read).
+#[tauri::command]
+async fn list_audio(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
+    let install = install_path(&app)?;
+    let workspace = workspace::project_dir(&install, &id)
+        .to_string_lossy()
+        .to_string();
+    rpc(app, state.sidecar.clone(), "list_audio", json!({ "workspace": workspace })).await
+}
+
+/// Transcribe pending audio meta documents via OpenRouter STT (sidecar), then index.
+#[tauri::command]
+async fn transcribe_audio(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
+    ensure_configured(&app, &state, Some(&id)).await?;
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    let workspace = project.to_string_lossy().to_string();
+
+    let guard = state
+        .jobs
+        .try_begin(&app, &project, JobKind::Transcribe, &id, "Transcribing audio")
+        .map_err(|busy| reject_job_busy(&app, &id, "transcribe", busy))?;
+
+    workspace::append_eventlog(&project, "transcription", "START", "transcribe pending audio");
+
+    let result = rpc(
+        app.clone(),
+        state.sidecar.clone(),
+        "transcribe_audio",
+        json!({ "workspace": workspace }),
+    )
+    .await;
+
+    match &result {
+        Err(e) => {
+            guard.fail_with("transcription", &format!("transcription failed — {e}"));
+        }
+        Ok(_) => {
+            workspace::append_eventlog(&project, "transcription", "SUCCESS", "transcription complete");
+        }
+    }
+    drop(guard);
+    result
+}
+
 // ===== settings & models ==================================================
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Value {
@@ -1040,6 +1119,9 @@ pub fn run() {
             remove_supabase,
             list_supabase,
             snapshot_supabase,
+            add_audio_files,
+            list_audio,
+            transcribe_audio,
             get_settings,
             set_models,
             list_models,

@@ -45,6 +45,28 @@ def test_scan_items_includes_supabase_snapshots(tmp_path: Path):
     assert "Supabase config snapshots:" in prompt
 
 
+def test_raw_audio_excluded_but_transcript_indexed(tmp_path: Path):
+    ws = tmp_path / "project"
+    ws.mkdir()
+    (ws / ".contextful.json").write_text(
+        json.dumps({"display_name": "demo", "project_type": "both", "repos": []}),
+        encoding="utf-8",
+    )
+    audio_dir = ws / "meta" / "audio"
+    audio_dir.mkdir(parents=True)
+    # raw audio should never become an index item (it's binary)
+    (audio_dir / "clip.mp3").write_bytes(b"\x00\x01fake-audio-bytes")
+    # its transcript is a normal meta document and must be indexed
+    (audio_dir / "clip.mp3.transcript.md").write_text(
+        "# Transcript: clip.mp3\n\nhello world\n", encoding="utf-8"
+    )
+
+    items = scan_items(ws, include_artifacts=False)
+    meta_ids = {i["id"] for i in items if i["type"] == "meta"}
+    assert "meta:audio/clip.mp3" not in meta_ids
+    assert "meta:audio/clip.mp3.transcript.md" in meta_ids
+
+
 class FakeClient:
     async def chat_completion(self, *, model, messages, tools=None, on_token=None):
         _ = model, tools, on_token

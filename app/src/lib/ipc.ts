@@ -87,6 +87,16 @@ export interface MetaEntry {
   size?: number;
 }
 
+export interface AudioFile {
+  path: string;
+  name: string;
+  size: number;
+  transcribed: boolean;
+  transcriptPath?: string | null;
+  transcribedAt?: string | null;
+  model?: string | null;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant" | string;
   content: string;
@@ -234,7 +244,7 @@ export interface WorkspaceIndex {
 
 export interface JobInfo {
   key: string;
-  kind: "run" | "index" | "clone" | "pull" | "snapshot";
+  kind: "run" | "index" | "clone" | "pull" | "snapshot" | "transcribe";
   projectId: string;
   label: string;
   startedAt: string;
@@ -283,6 +293,15 @@ export const api = {
       "snapshot_supabase",
       { id, projectRef },
     ),
+
+  addAudioFiles: (id: string) => invoke<string[]>("add_audio_files", { id }),
+  listAudio: (id: string) => invoke<{ audio: AudioFile[] }>("list_audio", { id }),
+  transcribeAudio: (id: string) =>
+    invoke<{
+      transcribed: string[];
+      skipped: { path: string; reason: string }[];
+      failed: { path: string; reason: string }[];
+    }>("transcribe_audio", { id }),
 
   getSettings: () => invoke<SetupStatus>("get_settings"),
   setModels: (projectId: string, models: Record<string, string>) =>

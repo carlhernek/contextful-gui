@@ -6,6 +6,7 @@ import { PipelineTab } from "./components/PipelineTab";
 import { ChatPanel } from "./components/ChatPanel";
 import { MetaDocumentsTab } from "./components/MetaDocumentsTab";
 import { ConnectionsTab } from "./components/ConnectionsTab";
+import { AudioTab } from "./components/AudioTab";
 import { RunHistory } from "./components/RunHistory";
 import { ResultsView } from "./components/ResultsView";
 import { EventLogPanel } from "./components/EventLogPanel";
@@ -16,12 +17,13 @@ import { JobsProvider } from "./lib/jobs";
 import { useModuleSelection } from "./hooks/useModuleSelection";
 import { useResumeRun } from "./hooks/useResumeRun";
 
-type Tab = "chat" | "pipeline" | "meta" | "repos" | "results" | "logs";
+type Tab = "chat" | "pipeline" | "meta" | "audio" | "repos" | "results" | "logs";
 
 const TAB_LABELS: Record<Tab, string> = {
   chat: "Chat",
   pipeline: "Pipeline",
   meta: "Meta documents",
+  audio: "Audio",
   repos: "Connections",
   results: "Results",
   logs: "Logs",
@@ -106,7 +108,7 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
           </h1>
           <div className="flex items-center gap-3">
             <ActivityIndicator />
-            {(["chat", "pipeline", "meta", "repos", "results", "logs"] as Tab[]).map((t) => (
+            {(["chat", "pipeline", "meta", "audio", "repos", "results", "logs"] as Tab[]).map((t) => (
               <button
                 key={t}
                 type="button"
@@ -164,6 +166,8 @@ function WorkspaceView({ status, onReset }: { status: SetupStatus; onReset: () =
             />
           ) : tab === "meta" ? (
             <MetaDocumentsTab projectId={active.id} />
+          ) : tab === "audio" ? (
+            <AudioTab projectId={active.id} />
           ) : tab === "repos" ? (
             <ConnectionsTab projectId={active.id} />
           ) : tab === "results" ? (

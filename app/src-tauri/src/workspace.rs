@@ -950,6 +950,7 @@ const META_UPLOAD_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico",
     "json", "yaml", "yml", "xml", "toml", "ini", "cfg", "log",
     "html", "htm", "css", "py", "js", "ts", "tsx", "jsx", "rs", "go", "java", "sh", "sql",
+    "mp3", "wav", "m4a", "ogg", "flac", "aac", "aiff", "webm",
 ];
 
 fn meta_upload_allowed(name: &str) -> bool {

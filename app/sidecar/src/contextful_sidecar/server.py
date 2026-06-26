@@ -17,10 +17,15 @@ from contextful_sidecar.runtime.supabase import (
     list_projects as supabase_list_projects,
     snapshot as supabase_snapshot,
 )
+from contextful_sidecar.runtime.transcription import (
+    list_audio as transcription_list_audio,
+    transcribe_pending,
+)
 
 DEFAULT_MODELS: dict[str, str] = {
     "orchestrator": "deepseek/deepseek-v4-flash",
     "module": "deepseek/deepseek-v4-flash",
+    "transcription": "openai/whisper-large-v3",
 }
 
 
@@ -116,6 +121,11 @@ class SidecarServer:
                     subdir=params.get("subdir", ""),
                 )
                 return {"id": req_id, "result": result}
+            # Listing audio files is a pure filesystem read (no LLM client).
+            if method == "list_audio":
+                return {"id": req_id, "result": {
+                    "audio": transcription_list_audio(params.get("workspace", "")),
+                }}
             if not self.client:
                 return {"id": req_id, "error": "not configured"}
             workspace = params.get("workspace", "")
@@ -158,6 +168,27 @@ class SidecarServer:
                 )
                 if self.should_cancel():
                     return {"id": req_id, "error": "cancelled"}
+                return {"id": req_id, "result": result}
+            if method == "transcribe_audio":
+                result = await transcribe_pending(
+                    workspace=workspace,
+                    client=self.client,
+                    model=self.models.get("transcription")
+                    or DEFAULT_MODELS["transcription"],
+                    language=params.get("language") or None,
+                    on_event=lambda ev, data: self._emit_event(req_id, ev, data),
+                )
+                # Standalone module "includes indexing": pull the freshly written
+                # transcripts (and any other changes) into the workspace index.
+                if result.get("transcribed") and not self.should_cancel():
+                    await refresh_index(
+                        workspace=Path(workspace),
+                        client=self.client,
+                        models=self.models,
+                        skip_enrichment=False,
+                        on_event=lambda ev, data: self._emit_event(req_id, ev, data),
+                        should_cancel=self.should_cancel,
+                    )
                 return {"id": req_id, "result": result}
             return {"id": req_id, "error": f"unknown method: {method}"}
         except asyncio.CancelledError:

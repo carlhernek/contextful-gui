@@ -5,17 +5,26 @@ import json
 import re
 from pathlib import Path
 
+# Audio is transcribed into text meta documents; the raw audio itself is never
+# read as text and is excluded from the index in favor of its transcript.
+AUDIO_EXTENSIONS = {
+    ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".aiff", ".webm",
+}
 BINARY_EXTENSIONS = {
     ".docx", ".doc", ".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".webp",
     ".xlsx", ".xls", ".pptx", ".ppt", ".bin", ".exe", ".dll",
     ".ttf", ".otf", ".woff", ".woff2", ".eot",
-}
+} | AUDIO_EXTENSIONS
 DOCX_EXTENSIONS = {".docx", ".doc"}
 SNIPPET_CAP = 500
 
 
 def is_binary_path(path: Path) -> bool:
     return path.suffix.lower() in BINARY_EXTENSIONS
+
+
+def is_audio_path(path: Path) -> bool:
+    return path.suffix.lower() in AUDIO_EXTENSIONS
 
 
 def extract_docx_text(path: Path, cap: int = SNIPPET_CAP) -> str:

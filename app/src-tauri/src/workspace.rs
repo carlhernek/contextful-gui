@@ -1017,6 +1017,9 @@ pub fn upload_meta_files(
 ) -> Result<Vec<String>> {
     let project = project_dir(install, id);
     let dest_dir = meta_rel_to_path(&project, dest_rel_path)?;
+    // Create the destination on demand (e.g. meta/audio/ on first upload) so
+    // adding files "just works" instead of failing on a missing folder.
+    fs::create_dir_all(&dest_dir).ok();
     if !dest_dir.is_dir() {
         bail!("upload destination is not a directory");
     }

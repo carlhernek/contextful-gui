@@ -1,8 +1,16 @@
 import { useEffect, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, type AudioFile } from "../lib/ipc";
 import { useJob } from "../lib/jobs";
 import { IndexButton } from "./IndexButton";
 import { Spinner } from "./Spinner";
+
+const AUDIO_EXTENSIONS = ["mp3", "wav", "m4a", "ogg", "flac", "aac", "aiff", "webm"];
+
+function hasAudioExtension(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return AUDIO_EXTENSIONS.includes(ext);
+}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -18,6 +26,7 @@ export function AudioTab({ projectId }: { projectId: string }) {
   const [audio, setAudio] = useState<AudioFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const { busy: transcribeBusy } = useJob("transcribe", projectId);
@@ -54,6 +63,51 @@ export function AudioTab({ projectId }: { projectId: string }) {
     }
   };
 
+  const addDroppedPaths = async (paths: string[]) => {
+    const audioPaths = paths.filter(hasAudioExtension);
+    if (audioPaths.length === 0) {
+      setError(
+        `No audio files in the drop. Supported types: ${AUDIO_EXTENSIONS.join(", ")}.`,
+      );
+      return;
+    }
+    setAdding(true);
+    setError(null);
+    try {
+      await api.addAudioPaths(projectId, audioPaths);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "over" || event.payload.type === "enter") {
+          setDragOver(true);
+        } else if (event.payload.type === "drop") {
+          setDragOver(false);
+          void addDroppedPaths(event.payload.paths);
+        } else {
+          setDragOver(false);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
   const transcribe = async () => {
     setError(null);
     try {
@@ -67,13 +121,18 @@ export function AudioTab({ projectId }: { projectId: string }) {
   const pendingCount = audio.filter((a) => !a.transcribed).length;
 
   return (
-    <div className="mx-auto max-w-3xl">
+    <div className="relative mx-auto max-w-3xl">
+      {dragOver && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-cf-accent bg-cf-accent/10 text-sm font-medium text-cf-accent">
+          Drop audio files to add them to meta/audio/
+        </div>
+      )}
       <div className="mb-3 rounded-md border border-cf-border bg-cf-surface-2 px-3 py-2 text-xs text-cf-muted">
-        Audio files are meta documents stored under <code>meta/audio/</code>. Transcription uses
-        OpenRouter and only processes audio that hasn&apos;t been transcribed before; each transcript
-        is saved as an indexed <code>.transcript.md</code> next to its audio, and the raw audio is
-        kept out of the index in favor of the transcript. The transcription model is configured in
-        Settings.
+        Drag &amp; drop audio files here (or use <em>Add audio…</em>) to copy them into{" "}
+        <code>meta/audio/</code>. Adding never transcribes — transcription runs only when you click{" "}
+        <em>Transcribe pending</em> or a module needs it. Each transcript is saved as an indexed{" "}
+        <code>.transcript.md</code> next to its audio (the raw audio stays out of the index). The
+        transcription model is configured in Settings.
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -106,7 +165,9 @@ export function AudioTab({ projectId }: { projectId: string }) {
       </div>
 
       {audio.length === 0 && !loading && (
-        <p className="text-sm text-cf-muted">No audio yet. Add audio files to get started.</p>
+        <p className="text-sm text-cf-muted">
+          No audio yet. Drag &amp; drop audio files anywhere here, or use “Add audio…”.
+        </p>
       )}
 
       <div className="space-y-1">

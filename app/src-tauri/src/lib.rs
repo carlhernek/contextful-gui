@@ -416,6 +416,41 @@ async fn add_audio_files(app: AppHandle, id: String) -> CmdResult<Vec<String>> {
     Ok(uploaded)
 }
 
+/// Copy drag-and-dropped audio files into `meta/audio/`.
+///
+/// Filters dropped paths to known audio extensions, skips folders, and never
+/// triggers transcription — transcripts are produced only on an explicit
+/// transcribe/module run.
+#[tauri::command]
+async fn add_audio_paths(app: AppHandle, id: String, paths: Vec<String>) -> CmdResult<Vec<String>> {
+    let install = install_path(&app)?;
+    let project = workspace::project_dir(&install, &id);
+    let sources: Vec<String> = paths
+        .into_iter()
+        .filter(|p| {
+            std::path::Path::new(p)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| AUDIO_PICK_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+                .unwrap_or(false)
+        })
+        .collect();
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let uploaded = workspace::upload_meta_files(&install, &id, &sources, "audio").map_err(|e| {
+        log_project_error(&project, "transcription", &format!("add audio failed — {e}"));
+        err(e)
+    })?;
+    workspace::append_eventlog(
+        &project,
+        "transcription",
+        "SUCCESS",
+        &format!("added {} audio file(s): {}", uploaded.len(), uploaded.join(", ")),
+    );
+    Ok(uploaded)
+}
+
 /// List audio meta documents and their transcription status (filesystem read).
 #[tauri::command]
 async fn list_audio(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<Value> {
@@ -1120,6 +1155,7 @@ pub fn run() {
             list_supabase,
             snapshot_supabase,
             add_audio_files,
+            add_audio_paths,
             list_audio,
             transcribe_audio,
             get_settings,

@@ -295,6 +295,8 @@ export const api = {
     ),
 
   addAudioFiles: (id: string) => invoke<string[]>("add_audio_files", { id }),
+  addAudioPaths: (id: string, paths: string[]) =>
+    invoke<string[]>("add_audio_paths", { id, paths }),
   listAudio: (id: string) => invoke<{ audio: AudioFile[] }>("list_audio", { id }),
   transcribeAudio: (id: string) =>
     invoke<{

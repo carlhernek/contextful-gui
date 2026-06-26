@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
+import wave
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from contextful_sidecar.runtime.file_text import AUDIO_EXTENSIONS
 from contextful_sidecar.runtime.openrouter import OpenRouterClient
@@ -27,9 +29,13 @@ _SCOPE = "transcription"
 MANIFEST_REL = "meta/.transcripts.json"
 MANIFEST_VERSION = 1
 TRANSCRIPT_SUFFIX = ".transcript.md"
-# Most STT providers cap upload size; guard well under typical limits. Long-audio
-# chunking is a future enhancement.
+# Most STT providers cap upload size; guard well under typical limits. Oversized
+# WAV files are split into sub-cap segments and transcribed chunk-by-chunk (see
+# _iter_wav_chunks); other oversized formats are reported instead.
 MAX_AUDIO_BYTES = 24 * 1024 * 1024
+# Per-chunk raw audio budget. Kept at 3/4 of the cap so the base64-encoded
+# upload (~4/3 larger) also stays under MAX_AUDIO_BYTES.
+_CHUNK_TARGET_BYTES = (MAX_AUDIO_BYTES * 3) // 4
 _HASH_CHUNK = 1024 * 1024
 
 
@@ -54,6 +60,65 @@ def _file_hash(fp: Path) -> str:
 
 def _audio_format(fp: Path) -> str:
     return fp.suffix.lower().lstrip(".")
+
+
+def _iter_wav_chunks(fp: Path, target_data_bytes: int) -> Iterator[bytes]:
+    """Yield standalone WAV blobs, each holding a slice of the source WAV.
+
+    Splits strictly on frame boundaries so every emitted blob is an independently
+    decodable WAV (correct header + a contiguous run of PCM frames). Used to keep
+    each STT upload under the provider size cap without any external tooling.
+    """
+    with wave.open(str(fp), "rb") as src:
+        nchannels = src.getnchannels()
+        sampwidth = src.getsampwidth()
+        framerate = src.getframerate()
+        bytes_per_frame = max(1, nchannels * sampwidth)
+        frames_per_chunk = max(1, target_data_bytes // bytes_per_frame)
+        while True:
+            frames = src.readframes(frames_per_chunk)
+            if not frames:
+                break
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as out:
+                out.setnchannels(nchannels)
+                out.setsampwidth(sampwidth)
+                out.setframerate(framerate)
+                out.writeframes(frames)
+            yield buf.getvalue()
+
+
+async def _transcribe_wav_in_chunks(
+    fp: Path,
+    *,
+    client: OpenRouterClient,
+    model: str,
+    language: str | None,
+    workspace: Path,
+    rel: str,
+) -> str:
+    """Transcribe an oversized WAV by splitting it into sub-cap segments.
+
+    Each segment is transcribed independently and the texts are concatenated in
+    order. Raises if any segment fails so the caller marks the file failed.
+    """
+    chunks = list(_iter_wav_chunks(fp, _CHUNK_TARGET_BYTES))
+    total = len(chunks)
+    _log(workspace, "REQUEST", f"{rel} split into {total} chunk(s) for transcription")
+    parts: list[str] = []
+    for idx, blob in enumerate(chunks, start=1):
+        audio_b64 = base64.b64encode(blob).decode("ascii")
+        _log(workspace, "REQUEST", f"{rel} chunk {idx}/{total} -> STT bytes={len(blob)}")
+        text = await client.transcribe(
+            model=model, audio_b64=audio_b64, fmt="wav", language=language
+        )
+        parts.append(text.strip())
+        _log(
+            workspace,
+            "WRITE",
+            f"{rel} chunk {idx}/{total} transcribed ({len(text)} chars)",
+        )
+    return "\n\n".join(p for p in parts if p)
 
 
 def _iter_audio_files(meta_dir: Path) -> list[Path]:
@@ -195,21 +260,42 @@ async def transcribe_pending(
             size = fp.stat().st_size
         except OSError:
             size = 0
-        if size > MAX_AUDIO_BYTES:
-            reason = f"file too large ({size} bytes > {MAX_AUDIO_BYTES})"
+
+        fmt = _audio_format(fp)
+        oversized = size > MAX_AUDIO_BYTES
+        if oversized and fmt != "wav":
+            reason = (
+                f"file too large ({size} bytes > {MAX_AUDIO_BYTES}); "
+                "convert to WAV to enable automatic chunked transcription"
+            )
             failed.append({"path": rel, "reason": reason})
             _log(workspace, "WARN", f"{rel} skipped — {reason}")
             continue
 
-        fmt = _audio_format(fp)
         on_event("transcribe", {"path": rel, "status": "transcribing"})
-        _log(workspace, "REQUEST", f"{rel} -> STT model={model} fmt={fmt} bytes={size}")
         try:
-            raw = fp.read_bytes()
-            audio_b64 = base64.b64encode(raw).decode("ascii")
-            text = await client.transcribe(
-                model=model, audio_b64=audio_b64, fmt=fmt, language=language
-            )
+            if oversized:
+                _log(
+                    workspace,
+                    "REQUEST",
+                    f"{rel} -> STT model={model} fmt=wav bytes={size} "
+                    f"(oversized; chunking at {_CHUNK_TARGET_BYTES} bytes)",
+                )
+                text = await _transcribe_wav_in_chunks(
+                    fp,
+                    client=client,
+                    model=model,
+                    language=language,
+                    workspace=workspace,
+                    rel=rel,
+                )
+            else:
+                _log(workspace, "REQUEST", f"{rel} -> STT model={model} fmt={fmt} bytes={size}")
+                raw = fp.read_bytes()
+                audio_b64 = base64.b64encode(raw).decode("ascii")
+                text = await client.transcribe(
+                    model=model, audio_b64=audio_b64, fmt=fmt, language=language
+                )
         except Exception as exc:  # noqa: BLE001
             reason = str(exc) or type(exc).__name__
             failed.append({"path": rel, "reason": reason})

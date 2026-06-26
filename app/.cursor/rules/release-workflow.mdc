@@ -34,9 +34,20 @@ sequence autonomously. Do **not** stop to ask for confirmation at any step.
    `app/src-tauri/Cargo.toml`, `app/sidecar/pyproject.toml`. Then refresh
    lockfiles (`uv sync` in `app/sidecar`, `npm install --package-lock-only`
    in `app/` — this also updates `Cargo.lock`).
-3. **Build** — `npm run build:all` in `app/`. Copy the new
-   `Contextful_<ver>_aarch64.dmg` + `Contextful.app` into `dist/`, remove the
-   old version's artifacts, and reinstall to `/Applications/Contextful.app`.
+3. **Build & install** — `npm run build:all` in `app/`. Then publish exactly
+   one version locally:
+   - The canonical dist folder is `contextful-gui/dist/` (NOT the repo-root
+     `contextful/dist/`). Copy the new `Contextful_<ver>_aarch64.dmg` +
+     `Contextful.app` there.
+   - **Clean out every stale version** — delete all other `Contextful_*.dmg`
+     and `Contextful.app` from `contextful-gui/dist/` so only the just-built
+     version remains. Also remove any orphaned `Contextful.app` / DMG copies
+     found elsewhere on the machine (e.g. a stray repo-root `dist/`), since
+     LaunchServices/Spotlight can launch a stale copy by mistake.
+   - Reinstall to `/Applications/Contextful.app` (replace, don't keep old
+     copies), so the **only** installed app on the local machine is the latest.
+   - After installing, verify the running app reports the new version (e.g.
+     confirm a fresh `.eventlog` line reads `app v<ver>`).
 4. **Commit** — `git add -A` and commit with a `vX.Y.Z: <summary>` message.
 5. **Release** — `git push origin master`, `git tag vX.Y.Z`,
    `git push origin vX.Y.Z`, then `gh release create vX.Y.Z <dmg>` with notes.

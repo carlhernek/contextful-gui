@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import wave
 from pathlib import Path
 
 from contextful_sidecar.runtime import transcription
@@ -114,6 +115,61 @@ def test_no_audio_or_key_in_eventlog(tmp_path: Path):
     # raw audio bytes never logged, in any encoding
     assert "TOP-SECRET-AUDIO-PAYLOAD" not in eventlog
     assert base64.b64encode(secret_bytes).decode("ascii") not in eventlog
+
+
+def _make_wav(fp: Path, *, frames: int, framerate: int = 8000) -> None:
+    """Write a mono 16-bit PCM WAV with the given number of frames."""
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(fp), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(framerate)
+        w.writeframes(b"\x01\x02" * frames)
+
+
+def test_large_wav_is_chunked_and_joined(tmp_path: Path, monkeypatch):
+    # Shrink the cap/chunk budget so a tiny WAV exercises the split path.
+    monkeypatch.setattr(transcription, "MAX_AUDIO_BYTES", 1000)
+    monkeypatch.setattr(transcription, "_CHUNK_TARGET_BYTES", 400)
+
+    ws = tmp_path / "project"
+    rel = "meta/audio/big.wav"
+    fp = ws / rel
+    _make_wav(fp, frames=4000)  # 8000 data bytes -> well over the 1000-byte cap
+    assert fp.stat().st_size > transcription.MAX_AUDIO_BYTES
+
+    client = FakeSTTClient("part")
+    result = asyncio.run(
+        transcription.transcribe_pending(workspace=ws, client=client, model="m")
+    )
+
+    assert result["transcribed"] == [rel]
+    assert result["failed"] == []
+    # Split into multiple sub-cap chunks, each uploaded as wav, each under the cap.
+    assert len(client.calls) > 1
+    assert all(c["fmt"] == "wav" for c in client.calls)
+    for c in client.calls:
+        assert len(base64.b64decode(c["b64"])) <= transcription.MAX_AUDIO_BYTES
+
+    transcript = (ws / "meta/audio/big.wav.transcript.md").read_text(encoding="utf-8")
+    # One "part" per chunk, joined in order.
+    assert transcript.count("part") == len(client.calls)
+
+
+def test_oversized_non_wav_reports_clear_reason(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(transcription, "MAX_AUDIO_BYTES", 10)
+    ws = tmp_path / "project"
+    _make_audio(ws, "meta/audio/big.mp3", b"x" * 100)
+    client = FakeSTTClient()
+
+    result = asyncio.run(
+        transcription.transcribe_pending(workspace=ws, client=client, model="m")
+    )
+
+    assert result["transcribed"] == []
+    assert len(result["failed"]) == 1
+    assert "convert to WAV" in result["failed"][0]["reason"]
+    assert client.calls == []  # never uploaded
 
 
 def test_list_audio_reports_status(tmp_path: Path):

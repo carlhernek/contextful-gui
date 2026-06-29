@@ -617,13 +617,26 @@ pub fn clone_repos(install: &Path, id: &str) -> Result<Value> {
         match clone_one(&repo.url, &repo.branch, &dest) {
             Ok(()) => {
                 let _ = harden_readonly_repo(&dest);
+                let resolved = resolve_repo_branch(&dest, &repo.branch);
+                if resolved != repo.branch {
+                    let _ = update_repo_branch(install, id, &repo.name, &resolved);
+                    append_eventlog(
+                        &project,
+                        "git",
+                        "INFO",
+                        &format!(
+                            "{} branch corrected {} -> {}",
+                            repo.name, repo.branch, resolved
+                        ),
+                    );
+                }
                 append_eventlog(
                     &project,
                     "git",
                     "SUCCESS",
-                    &format!("{} cloned (branch {})", repo.name, repo.branch),
+                    &format!("{} cloned (branch {})", repo.name, resolved),
                 );
-                results.push(json!({"name": repo.name, "ok": true, "status": "cloned"}));
+                results.push(json!({"name": repo.name, "ok": true, "status": "cloned", "branch": resolved}));
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -658,6 +671,67 @@ fn repo_remote_url(repo_dir: &Path) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Pick the branch to track for fetch/merge: prefer ``configured`` when it exists
+/// on the remote, otherwise detect from origin/HEAD, current HEAD, or main/master.
+fn detect_origin_branch<F>(git: F, configured: &str) -> String
+where
+    F: Fn(&[&str]) -> Result<String>,
+{
+    let configured = configured.trim();
+    if !configured.is_empty() {
+        if git(&["rev-parse", "--verify", &format!("origin/{configured}")]).is_ok() {
+            return configured.to_string();
+        }
+    }
+    if let Ok(out) = git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+        if let Some(branch) = out.trim().strip_prefix("origin/") {
+            if !branch.is_empty() {
+                return branch.to_string();
+            }
+        }
+    }
+    if let Ok(out) = git(&["rev-parse", "--abbrev-ref", "HEAD"]) {
+        let head = out.trim();
+        if !head.is_empty() && head != "HEAD" {
+            if git(&["rev-parse", "--verify", &format!("origin/{head}")]).is_ok() {
+                return head.to_string();
+            }
+            // Shallow clone without matching origin/* ref — trust checked-out branch.
+            if configured.is_empty()
+                || git(&["rev-parse", "--verify", &format!("origin/{configured}")]).is_err()
+            {
+                return head.to_string();
+            }
+        }
+    }
+    for cand in ["main", "master", "develop"] {
+        if git(&["rev-parse", "--verify", &format!("origin/{cand}")]).is_ok() {
+            return cand.to_string();
+        }
+    }
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    default_branch()
+}
+
+fn resolve_repo_branch(dest: &Path, configured: &str) -> String {
+    detect_origin_branch(|args| repo_git_run(args, dest), configured)
+}
+
+fn update_repo_branch(install: &Path, id: &str, name: &str, branch: &str) -> Result<()> {
+    let project = project_dir(install, id);
+    let mut meta = read_meta(&project)?;
+    let Some(repo) = meta.repos.iter_mut().find(|r| r.name == name) else {
+        return Ok(());
+    };
+    if repo.branch != branch {
+        repo.branch = branch.to_string();
+        write_meta(&project, &meta)?;
+    }
+    Ok(())
 }
 
 fn clone_one(url: &str, branch: &str, dest: &Path) -> Result<()> {
@@ -788,16 +862,29 @@ pub fn pull_repos(install: &Path, id: &str) -> Result<Value> {
             continue;
         }
         let _ = harden_readonly_repo(&dest);
-        let branch = if repo.branch.is_empty() {
+        let configured = if repo.branch.is_empty() {
             default_branch()
         } else {
             repo.branch.clone()
         };
         let remote_url = repo_remote_url(&dest).unwrap_or_else(|| repo.url.clone());
         let auth_url = resolve_git_auth_url(&repo.url, &remote_url);
-        let fetch_result = repo_git_run_authed(&["fetch", "origin", &branch], &dest, Some(&auth_url));
+        let fetch_result = repo_git_run_authed(&["fetch", "origin"], &dest, Some(&auth_url));
         match fetch_result {
             Ok(_) => {
+                let branch = resolve_repo_branch(&dest, &configured);
+                if branch != configured {
+                    let _ = update_repo_branch(install, id, &repo.name, &branch);
+                    append_eventlog(
+                        &project,
+                        "git",
+                        "INFO",
+                        &format!(
+                            "{} branch corrected {} -> {}",
+                            repo.name, configured, branch
+                        ),
+                    );
+                }
                 let merge_ref = format!("origin/{branch}");
                 match repo_git_run(&["merge", "--ff-only", &merge_ref], &dest) {
                     Ok(_) => {
@@ -1639,22 +1726,7 @@ fn parse_semver(s: &str) -> (u64, u64, u64) {
 /// The files repo historically used `master`, so hardcoding `main` silently
 /// breaks version checks and module pulls. Detect it instead of assuming.
 fn template_default_branch(template: &Path) -> String {
-    if let Ok(out) = git_run(
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-        template,
-    ) {
-        if let Some(branch) = out.trim().strip_prefix("origin/") {
-            if !branch.is_empty() {
-                return branch.to_string();
-            }
-        }
-    }
-    for cand in ["main", "master"] {
-        if git_run(&["rev-parse", "--verify", &format!("origin/{cand}")], template).is_ok() {
-            return cand.to_string();
-        }
-    }
-    "main".to_string()
+    detect_origin_branch(|args| git_run(args, template), "")
 }
 
 pub fn get_modules_version_status(install: &Path, id: &str, fetch: bool) -> Result<Value> {
@@ -1882,6 +1954,77 @@ mod tests {
         fs::write(path.join(file), "content\n").unwrap();
         git_run(&["add", "."], path).unwrap();
         git_run(&["-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-m", "init"], path).unwrap();
+    }
+
+    fn init_git_repo_on_branch(path: &Path, branch: &str, file: &str) {
+        fs::create_dir_all(path).unwrap();
+        git_run(&["init", "-b", branch], path).unwrap();
+        fs::write(path.join(file), "content\n").unwrap();
+        git_run(&["add", "."], path).unwrap();
+        git_run(&["-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-m", "init"], path).unwrap();
+    }
+
+    #[test]
+    fn resolve_repo_branch_detects_master_when_meta_says_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        init_git_repo_on_branch(&origin, "master", "README.md");
+        let clone_dir = tmp.path().join("clone");
+        let clone_parent = clone_dir.parent().unwrap();
+        repo_git_run_authed(
+            &[
+                "clone",
+                "--depth",
+                "1",
+                origin.to_str().unwrap(),
+                clone_dir.file_name().unwrap().to_str().unwrap(),
+            ],
+            clone_parent,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolve_repo_branch(&clone_dir, "main"), "master");
+    }
+
+    #[test]
+    fn pull_repos_fetches_detected_branch_not_stale_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        write_minimal_meta(&project, "P1");
+        let mut meta = read_meta(&project).unwrap();
+        meta.repos = vec![RepoEntry {
+            name: "GUI".to_string(),
+            url: String::new(),
+            branch: "main".to_string(),
+        }];
+        write_meta(&project, &meta).unwrap();
+
+        let origin = tmp.path().join("origin");
+        init_git_repo_on_branch(&origin, "master", "README.md");
+        let repos_dir = project.join("repos/GUI");
+        repo_git_run_authed(
+            &[
+                "clone",
+                "--depth",
+                "1",
+                origin.to_str().unwrap(),
+                repos_dir.file_name().unwrap().to_str().unwrap(),
+            ],
+            repos_dir.parent().unwrap(),
+            None,
+        )
+        .unwrap();
+
+        let result = pull_repos(install, "p1").unwrap();
+        let row = &result["results"].as_array().unwrap()[0];
+        assert_eq!(row["ok"].as_bool(), Some(true));
+        assert_eq!(row["status"].as_str(), Some("updated"));
+
+        let meta = read_meta(&project).unwrap();
+        assert_eq!(meta.repos[0].branch, "master");
+        let log = fs::read_to_string(project.join(".eventlog")).unwrap();
+        assert!(log.contains("branch corrected main -> master"));
     }
 
     #[test]

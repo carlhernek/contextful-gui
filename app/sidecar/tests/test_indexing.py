@@ -226,6 +226,47 @@ def test_format_index_for_prompt_includes_repo(workspace: Path):
     assert "Admin service" in text
 
 
+def test_item_timestamps_on_refresh(workspace: Path, monkeypatch):
+    times = iter([
+        "2026-06-01T10:00:00+02:00",
+        "2026-06-01T10:00:00+02:00",
+        "2026-06-01T10:00:00+02:00",
+        "2026-06-01T11:00:00+02:00",
+    ])
+
+    def fake_now():
+        return next(times, "2026-06-01T12:00:00+02:00")
+
+    monkeypatch.setattr(
+        "contextful_sidecar.runtime.indexing._now_iso",
+        fake_now,
+    )
+
+    async def run():
+        await refresh_index(workspace=workspace, client=None, skip_enrichment=True)
+        index1 = json.loads((workspace / INDEX_FILE).read_text(encoding="utf-8"))
+        meta = next(i for i in index1["items"] if i["id"] == "meta:requirements.md")
+        assert meta.get("indexedAt")
+        assert meta.get("contentUpdatedAt") == meta["indexedAt"]
+        first_indexed = meta["indexedAt"]
+        first_updated = meta["contentUpdatedAt"]
+
+        await refresh_index(workspace=workspace, client=None, skip_enrichment=True)
+        index2 = json.loads((workspace / INDEX_FILE).read_text(encoding="utf-8"))
+        meta2 = next(i for i in index2["items"] if i["id"] == "meta:requirements.md")
+        assert meta2["indexedAt"] == first_indexed
+        assert meta2["contentUpdatedAt"] == first_updated
+
+        (workspace / "meta" / "requirements.md").write_text("# Requirements\nUpdated content\n", encoding="utf-8")
+        await refresh_index(workspace=workspace, client=None, skip_enrichment=True)
+        index3 = json.loads((workspace / INDEX_FILE).read_text(encoding="utf-8"))
+        meta3 = next(i for i in index3["items"] if i["id"] == "meta:requirements.md")
+        assert meta3["indexedAt"] == first_indexed
+        assert meta3["contentUpdatedAt"] != first_updated
+
+    asyncio.run(run())
+
+
 def test_execute_readonly_tool_rejects_write(workspace: Path):
     result = execute_readonly_tool(workspace, "write_file", {"path": "x", "content": "y"})
     assert result.startswith("ERROR:")

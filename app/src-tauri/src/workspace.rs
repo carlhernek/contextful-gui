@@ -1449,7 +1449,7 @@ fn readable(id: &str) -> String {
 }
 
 fn packs_for(module_id: &str) -> Vec<&'static str> {
-    if module_id == "workspace-index" {
+    if module_id == "workspace-index" || module_id == "suggested-next-steps" {
         return vec!["Core"];
     }
     let mut packs = Vec::new();

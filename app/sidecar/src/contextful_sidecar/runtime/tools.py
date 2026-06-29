@@ -288,6 +288,17 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "gather_run_history",
+            "description": (
+                "Structured run timeline, open tasks from recent runs, and index/meta "
+                "delta since the last completed analysis run. Call first in suggested-next-steps."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 INDEX_TOOL_NAMES = frozenset({
@@ -891,6 +902,172 @@ def _gather_context(workspace: Path, path: str, trace: ToolTrace | None = None) 
     return out or f"(no context gathered for {path})"
 
 
+def _has_analysis_modules(completed_modules: list[Any]) -> bool:
+    from contextful_sidecar.runtime.runs import WORKSPACE_INDEX_MODULE
+
+    return any(str(m) != WORKSPACE_INDEX_MODULE for m in completed_modules)
+
+
+def _mtime_iso(fp: Path) -> str:
+    from datetime import datetime, timezone
+
+    st = fp.stat()
+    return datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _collect_open_tasks(workspace: Path, run_ids: list[str]) -> list[dict[str, Any]]:
+    from contextful_sidecar.runtime.runs import WORKSPACE_INDEX_MODULE
+
+    out: list[dict[str, Any]] = []
+    for run_id in run_ids:
+        run_dir = workspace / "runs" / run_id
+        if not run_dir.is_dir():
+            continue
+        try:
+            mod_dirs = sorted((p for p in run_dir.iterdir() if p.is_dir()), key=lambda p: p.name)
+        except OSError:
+            continue
+        for mod_dir in mod_dirs:
+            if mod_dir.name == WORKSPACE_INDEX_MODULE:
+                continue
+            tasks_path = mod_dir / "tasks.json"
+            if not tasks_path.is_file():
+                continue
+            try:
+                data = json.loads(tasks_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            module_id = str(data.get("moduleId") or mod_dir.name)
+            for task in data.get("tasks") or []:
+                if not isinstance(task, dict):
+                    continue
+                out.append({
+                    "runId": run_id,
+                    "moduleId": module_id,
+                    "taskId": task.get("id"),
+                    "title": task.get("title"),
+                    "priority": task.get("priority"),
+                })
+    return out
+
+
+def _compute_index_delta(workspace: Path, anchor_updated_at: str | None) -> dict[str, list[dict[str, Any]]]:
+    from contextful_sidecar.runtime.indexing import _iter_meta_files, load_index
+
+    new_items: list[dict[str, Any]] = []
+    changed_items: list[dict[str, Any]] = []
+    if not anchor_updated_at:
+        return {"newItems": new_items, "changedItems": changed_items}
+
+    index = load_index(workspace)
+    items = index.get("items") or []
+    indexed_ids_with_ts: set[str] = set()
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "")
+        indexed_at = item.get("indexedAt")
+        content_updated_at = item.get("contentUpdatedAt")
+        if indexed_at:
+            indexed_ids_with_ts.add(item_id)
+        if indexed_at and indexed_at > anchor_updated_at:
+            new_items.append({
+                "id": item_id,
+                "type": item.get("type"),
+                "path": item.get("path"),
+                "indexedAt": indexed_at,
+            })
+        elif (
+            content_updated_at
+            and content_updated_at > anchor_updated_at
+            and indexed_at
+            and indexed_at <= anchor_updated_at
+        ):
+            changed_items.append({
+                "id": item_id,
+                "type": item.get("type"),
+                "path": item.get("path"),
+                "contentUpdatedAt": content_updated_at,
+                "contentHash": item.get("contentHash"),
+            })
+
+    meta_dir = workspace / "meta"
+    if meta_dir.is_dir():
+        seen_paths = {i.get("path") for i in new_items + changed_items}
+        for fp in _iter_meta_files(meta_dir):
+            rel = fp.relative_to(workspace).as_posix()
+            if rel in seen_paths:
+                continue
+            rel_meta = fp.relative_to(meta_dir).as_posix()
+            item_id = f"meta:{rel_meta}"
+            index_item = next((i for i in items if i.get("id") == item_id), None)
+            if index_item and index_item.get("indexedAt"):
+                continue
+            try:
+                mtime_iso = _mtime_iso(fp)
+            except OSError:
+                continue
+            if mtime_iso > anchor_updated_at:
+                new_items.append({
+                    "id": item_id,
+                    "type": "meta",
+                    "path": rel,
+                    "indexedAt": None,
+                    "source": "mtime_fallback",
+                })
+    return {"newItems": new_items, "changedItems": changed_items}
+
+
+def _gather_run_history(workspace: Path, trace: ToolTrace | None = None) -> str:
+    from contextful_sidecar.runtime.runs import list_runs
+
+    trace = trace or get_trace()
+    if trace:
+        trace.set_phase("history")
+
+    runs = list_runs(workspace)
+    analysis_runs = [
+        r for r in runs
+        if r.get("status") == "complete"
+        and _has_analysis_modules(list(r.get("completedModules") or []))
+    ]
+    mode = "warm" if analysis_runs else "initial"
+    anchor = analysis_runs[0] if analysis_runs else {}
+    anchor_run_id = anchor.get("runId")
+    anchor_updated_at = anchor.get("updatedAt")
+
+    run_summaries: list[dict[str, Any]] = []
+    for run in runs:
+        run_id = str(run.get("runId") or "")
+        if not run_id:
+            continue
+        summary_rel = f"runs/{run_id}/run-summary.md"
+        summary_path = workspace / summary_rel
+        run_summaries.append({
+            "runId": run_id,
+            "status": run.get("status"),
+            "updatedAt": run.get("updatedAt"),
+            "completedModules": list(run.get("completedModules") or []),
+            "failedModule": run.get("failedModule"),
+            "summaryPath": summary_rel if summary_path.is_file() else None,
+        })
+
+    recent_run_ids = [str(r.get("runId")) for r in runs[:3] if r.get("runId")]
+    open_tasks = _collect_open_tasks(workspace, recent_run_ids)
+    delta = _compute_index_delta(workspace, str(anchor_updated_at) if anchor_updated_at else None)
+
+    payload = {
+        "mode": mode,
+        "anchorRunId": anchor_run_id,
+        "anchorUpdatedAt": anchor_updated_at,
+        "runs": run_summaries,
+        "openTasks": open_tasks,
+        "delta": delta,
+    }
+    return json.dumps(payload, indent=2)
+
+
 # --- dispatcher (sync; run off-loop by the agent) -------------------------
 def execute_tool(
     workspace: Path,
@@ -938,6 +1115,8 @@ def execute_tool(
             return _web_search(workspace, args["query"])
         if name == "gather_context":
             return _gather_context(workspace, args["path"], trace=trace)
+        if name == "gather_run_history":
+            return _gather_run_history(workspace, trace=trace)
         return f"ERROR: unknown tool: {name}"
     except ValueError as exc:  # path escape and similar
         return f"ERROR: {exc}"

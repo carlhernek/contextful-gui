@@ -724,6 +724,27 @@ async def _enrich_with_llm(
     return parsed
 
 
+def _item_timestamps(
+    raw: dict[str, Any],
+    prior: dict[str, Any] | None,
+) -> tuple[str, str]:
+    now = _now_iso()
+    content_hash = raw.get("contentHash", "")
+    if prior and prior.get("indexedAt"):
+        indexed_at = str(prior["indexedAt"])
+    else:
+        indexed_at = now
+
+    prior_hash = prior.get("contentHash") if prior else None
+    if prior_hash is not None and prior_hash != content_hash:
+        content_updated_at = now
+    elif prior and prior.get("contentUpdatedAt"):
+        content_updated_at = str(prior["contentUpdatedAt"])
+    else:
+        content_updated_at = indexed_at
+    return indexed_at, content_updated_at
+
+
 def _merge_item(
     raw: dict[str, Any],
     *,
@@ -731,6 +752,7 @@ def _merge_item(
     cache: dict[str, Any],
     ai: dict[str, Any] | None,
     prefer_ai: bool = False,
+    prior: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     item_id = raw["id"]
     user = annotations.get(item_id) if isinstance(annotations.get(item_id), dict) else {}
@@ -791,6 +813,9 @@ def _merge_item(
     }
     if user:
         out["userEdited"] = True
+    indexed_at, content_updated_at = _item_timestamps(raw, prior)
+    out["indexedAt"] = indexed_at
+    out["contentUpdatedAt"] = content_updated_at
     return out
 
 
@@ -830,6 +855,7 @@ async def refresh_index(
     raw_items = scan_items(ws)
     annotations = load_annotations(ws)
     cache = load_cache(ws)
+    prior_by_id = {i["id"]: i for i in load_index(ws).get("items", [])}
     force_set = set(force_item_ids or [])
     enriched = 0
     merged: list[dict[str, Any]] = []
@@ -876,6 +902,7 @@ async def refresh_index(
             cache=cache,
             ai=ai,
             prefer_ai=force_enrich and item_id in force_set,
+            prior=prior_by_id.get(item_id),
         ))
 
     doc = build_index_document(ws, merged)
@@ -976,6 +1003,7 @@ async def agentic_reindex(
 
     annotations = load_annotations(ws)
     cache = load_cache(ws)
+    prior_by_id = {i["id"]: i for i in load_index(ws).get("items", [])}
 
     append_eventlog(ws, MODULE_ID, "ENUMERATE", f"{total} items")
     on_event("index", {"phase": "enumerate", "total": total, "module": MODULE_ID})
@@ -986,11 +1014,12 @@ async def agentic_reindex(
 
     skeleton: list[dict[str, Any]] = []
     for raw in raw_items:
+        prior = prior_by_id.get(raw["id"])
         if indexed_check(raw):
-            merged = _merge_item(raw, annotations=annotations, cache=cache, ai=None)
+            merged = _merge_item(raw, annotations=annotations, cache=cache, ai=None, prior=prior)
             merged["status"] = "cached"
         else:
-            merged = _merge_item(raw, annotations=annotations, cache=cache, ai=None)
+            merged = _merge_item(raw, annotations=annotations, cache=cache, ai=None, prior=prior)
             merged["status"] = "pending"
             merged["description"] = merged.get("description") or ""
         skeleton.append(merged)
@@ -1123,6 +1152,7 @@ async def agentic_reindex(
                     cache=cache,
                     ai=ai,
                     prefer_ai=True,
+                    prior=entry,
                 )
                 skeleton[i]["status"] = "done"
                 break

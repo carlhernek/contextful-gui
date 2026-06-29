@@ -29,6 +29,45 @@ GUARD_TIMEOUT_SEC = 180.0
 GUARD_RETRIES = 2  # 3 attempts total
 GUARD_RETRY_BASE_DELAY_SEC = 1.0
 GUARD_RETRY_MAX_DELAY_SEC = 8.0
+# Emit a heartbeat this often during a long guarded await so the outer Rust
+# watchdog sees liveness even when the HTTP client is blocked on a large upload.
+GUARD_HEARTBEAT_SEC = 30.0
+
+
+async def _await_with_timeout(
+    factory: Callable[[], Awaitable[T]],
+    *,
+    timeout_sec: float,
+    label: str,
+    heartbeat: Callable[[str], None] | None,
+) -> T:
+    """``asyncio.wait_for`` with periodic heartbeats and reliable cancellation."""
+    task = asyncio.create_task(factory())
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                raise TimeoutError()
+            tick = min(GUARD_HEARTBEAT_SEC, remaining)
+            done, _ = await asyncio.wait({task}, timeout=tick)
+            if done:
+                return task.result()
+            if heartbeat:
+                heartbeat(f"{label} in progress ({int(remaining)}s left)")
+    except asyncio.CancelledError:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        raise
 
 
 async def run_guarded(
@@ -83,7 +122,12 @@ async def run_guarded(
 
     for attempt in range(attempts):
         try:
-            return await asyncio.wait_for(factory(), timeout=timeout_sec)
+            return await _await_with_timeout(
+                factory,
+                timeout_sec=timeout_sec,
+                label=label,
+                heartbeat=heartbeat,
+            )
         except asyncio.CancelledError:
             raise
         except (asyncio.TimeoutError, TimeoutError):

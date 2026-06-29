@@ -59,52 +59,42 @@ class OpenRouterClient:
         if language:
             body["language"] = language
 
-        # Explicit per-phase caps so a stalled read/write trips well under the
-        # 180s wall-clock guard wrapping this call, instead of relying on a
-        # single coarse timeout (which has been observed not to fire).
-        stt_timeout = httpx.Timeout(connect=15.0, read=150.0, write=150.0, pool=15.0)
-        last_exc: BaseException | None = None
-        for attempt in range(LLM_MAX_RETRIES + 1):
-            try:
-                async with httpx.AsyncClient(verify=certifi.where(), timeout=stt_timeout) as c:
-                    r = await c.post(
-                        f"{OPENROUTER_BASE}/audio/transcriptions",
-                        headers=self.headers,
-                        json=body,
-                    )
-                    if r.status_code in _TRANSIENT_HTTP and attempt < LLM_MAX_RETRIES:
-                        await self._backoff(attempt)
-                        continue
-                    r.raise_for_status()
-                    data = r.json()
-                text = data.get("text")
-                if not isinstance(text, str):
-                    raise RuntimeError("OpenRouter transcription response missing 'text'")
-                return text
-            except httpx.HTTPStatusError as exc:
-                detail = ""
-                try:
-                    detail = (exc.response.text or "")[:500].strip()
-                except Exception:  # noqa: BLE001
-                    pass
-                last_exc = (
-                    RuntimeError(f"OpenRouter HTTP {exc.response.status_code}: {detail}")
-                    if detail
-                    else exc
+        # One HTTP attempt per call — ``run_guarded`` owns timeout/retry so a
+        # single guarded unit cannot stack 3×3 internal attempts and run silent
+        # for many minutes without logging.
+        stt_timeout = httpx.Timeout(connect=15.0, read=90.0, write=60.0, pool=15.0)
+        try:
+            async with httpx.AsyncClient(verify=certifi.where(), timeout=stt_timeout) as c:
+                r = await c.post(
+                    f"{OPENROUTER_BASE}/audio/transcriptions",
+                    headers=self.headers,
+                    json=body,
                 )
-                if exc.response.status_code in _TRANSIENT_HTTP and attempt < LLM_MAX_RETRIES:
-                    await self._backoff(attempt)
-                    continue
-                raise last_exc
-            except (httpx.TransportError, httpx.ReadTimeout, asyncio.TimeoutError) as exc:
-                last_exc = exc
-                if attempt < LLM_MAX_RETRIES and is_transient_exception(exc):
-                    await self._backoff(attempt)
-                    continue
-                raise
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("transcription failed without response")
+                if r.status_code in _TRANSIENT_HTTP:
+                    detail = (r.text or "")[:500].strip()
+                    raise RuntimeError(
+                        f"OpenRouter HTTP {r.status_code}: {detail}" if detail
+                        else f"OpenRouter HTTP {r.status_code}"
+                    )
+                r.raise_for_status()
+                data = r.json()
+            text = data.get("text")
+            if not isinstance(text, str):
+                raise RuntimeError("OpenRouter transcription response missing 'text'")
+            return text
+        except httpx.HTTPStatusError as exc:
+            detail = ""
+            try:
+                detail = (exc.response.text or "")[:500].strip()
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError(
+                f"OpenRouter HTTP {exc.response.status_code}: {detail}"
+                if detail
+                else str(exc)
+            ) from exc
+        except (httpx.TransportError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+            raise RuntimeError(str(exc) or type(exc).__name__) from exc
 
     async def chat_completion(
         self,

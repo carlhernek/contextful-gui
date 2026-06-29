@@ -225,7 +225,7 @@ def test_hung_file_is_skipped_and_others_continue(tmp_path: Path, monkeypatch):
     assert "transcription RETRY" in log
 
 
-def test_cancel_between_chunks_stops_cleanly(tmp_path: Path, monkeypatch):
+def test_cancel_between_chunks_saves_partial_and_resumes(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(transcription, "MAX_AUDIO_BYTES", 1000)
     monkeypatch.setattr(transcription, "_CHUNK_TARGET_BYTES", 400)
     ws = tmp_path / "project"
@@ -245,8 +245,21 @@ def test_cancel_between_chunks_stops_cleanly(tmp_path: Path, monkeypatch):
                 workspace=ws, client=client, model="m", should_cancel=should_cancel
             )
         )
-    # Stopped mid-file, not all chunks transcribed.
-    assert len(client.calls) >= 1
+    assert len(client.calls) == 1
+
+    manifest = json.loads((ws / "meta" / ".transcripts.json").read_text())
+    partial = manifest["entries"]["meta/audio/big.wav"]["partial"]
+    assert len(partial["parts"]) == 1
+
+    # Second run should resume at chunk 2, not redo chunk 1.
+    result = asyncio.run(
+        transcription.transcribe_pending(workspace=ws, client=client, model="m")
+    )
+    assert result["transcribed"] == ["meta/audio/big.wav"]
+    # 1 call before cancel + remaining chunks on resume (4000 frames / 400 per chunk)
+    assert len(client.calls) > 1
+    log = (ws / ".eventlog").read_text()
+    assert "transcription RESUME" in log
 
 
 def test_list_audio_reports_status(tmp_path: Path):

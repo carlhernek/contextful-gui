@@ -36,9 +36,10 @@ TRANSCRIPT_SUFFIX = ".transcript.md"
 # WAV files are split into sub-cap segments and transcribed chunk-by-chunk (see
 # _iter_wav_chunks); other oversized formats are reported instead.
 MAX_AUDIO_BYTES = 24 * 1024 * 1024
-# Per-chunk raw audio budget. Kept at 3/4 of the cap so the base64-encoded
-# upload (~4/3 larger) also stays under MAX_AUDIO_BYTES.
-_CHUNK_TARGET_BYTES = (MAX_AUDIO_BYTES * 3) // 4
+# Per-chunk raw audio budget. Smaller segments (~8MB) upload faster and hit
+# fewer OpenRouter/Cloudflare 502s than ~19MB blobs. Kept at 3/4 of the cap
+# so the base64-encoded upload also stays under MAX_AUDIO_BYTES.
+_CHUNK_TARGET_BYTES = 8 * 1024 * 1024
 _HASH_CHUNK = 1024 * 1024
 
 
@@ -91,6 +92,45 @@ def _iter_wav_chunks(fp: Path, target_data_bytes: int) -> Iterator[bytes]:
             yield buf.getvalue()
 
 
+def _load_partial_parts(entry: dict[str, Any], content_hash: str) -> list[str]:
+    """Return completed chunk texts from a prior interrupted run, or []."""
+    partial = entry.get("partial")
+    if not isinstance(partial, dict):
+        return []
+    if partial.get("contentHash") != content_hash:
+        return []
+    if partial.get("chunkTargetBytes") != _CHUNK_TARGET_BYTES:
+        return []
+    parts = partial.get("parts")
+    if not isinstance(parts, list) or not all(isinstance(p, str) for p in parts):
+        return []
+    return list(parts)
+
+
+def _save_partial(
+    workspace: Path,
+    manifest: dict[str, Any],
+    entries: dict[str, Any],
+    *,
+    rel: str,
+    content_hash: str,
+    model: str,
+    parts: list[str],
+) -> None:
+    """Persist per-chunk progress so cancel/restart resumes instead of redoing."""
+    entries[rel] = {
+        "contentHash": content_hash,
+        "partial": {
+            "contentHash": content_hash,
+            "chunkTargetBytes": _CHUNK_TARGET_BYTES,
+            "parts": parts,
+            "model": model,
+            "updatedAt": _now_iso(),
+        },
+    }
+    _save_manifest(workspace, manifest)
+
+
 async def _transcribe_wav_in_chunks(
     fp: Path,
     *,
@@ -99,22 +139,36 @@ async def _transcribe_wav_in_chunks(
     language: str | None,
     workspace: Path,
     rel: str,
+    content_hash: str,
+    manifest: dict[str, Any],
+    entries: dict[str, Any],
     on_event: EventCallback,
     should_cancel: CancelCheck | None = None,
 ) -> str:
     """Transcribe an oversized WAV by splitting it into sub-cap segments.
 
     Each segment is transcribed independently (under the shared timeout+retry
-    guard) and the texts are concatenated in order. A per-chunk progress event
-    (and a heartbeat on each retry) is emitted so the outer watchdog sees
-    liveness during long multi-chunk files. Raises if any segment fails so the
-    caller marks the file failed.
+    guard) and the texts are concatenated in order. Completed chunk texts are
+    written to the manifest after every segment so cancel/restart resumes at
+    the next chunk instead of from the beginning.
     """
     chunks = list(_iter_wav_chunks(fp, _CHUNK_TARGET_BYTES))
     total = len(chunks)
-    _log(workspace, "REQUEST", f"{rel} split into {total} chunk(s) for transcription")
-    parts: list[str] = []
+    prior = entries.get(rel) if isinstance(entries.get(rel), dict) else {}
+    parts = _load_partial_parts(prior, content_hash)
+    if parts:
+        resume_at = len(parts) + 1
+        _log(
+            workspace,
+            "RESUME",
+            f"{rel} resuming at chunk {resume_at}/{total} ({len(parts)} already done)",
+        )
+    else:
+        _log(workspace, "REQUEST", f"{rel} split into {total} chunk(s) for transcription")
+
     for idx, blob in enumerate(chunks, start=1):
+        if idx <= len(parts):
+            continue
         if should_cancel and should_cancel():
             raise asyncio.CancelledError()
         audio_b64 = base64.b64encode(blob).decode("ascii")
@@ -132,6 +186,10 @@ async def _transcribe_wav_in_chunks(
             ),
         )
         parts.append(text.strip())
+        _save_partial(
+            workspace, manifest, entries,
+            rel=rel, content_hash=content_hash, model=model, parts=parts,
+        )
         _log(
             workspace,
             "WRITE",
@@ -210,6 +268,13 @@ def list_audio(workspace: str | Path) -> list[dict[str, Any]]:
             and transcript.is_file()
             and entry.get("contentHash") == _safe_hash(fp)
         )
+        partial = entry.get("partial") if isinstance(entry.get("partial"), dict) else {}
+        partial_parts = (
+            partial.get("parts")
+            if isinstance(partial.get("parts"), list)
+            and partial.get("contentHash") == _safe_hash(fp)
+            else None
+        )
         try:
             size = fp.stat().st_size
         except OSError:
@@ -219,6 +284,7 @@ def list_audio(workspace: str | Path) -> list[dict[str, Any]]:
             "name": fp.name,
             "size": size,
             "transcribed": transcribed,
+            "partialChunks": len(partial_parts) if partial_parts else 0,
             "transcriptPath": transcript.relative_to(workspace).as_posix()
             if transcript.is_file() else None,
             "transcribedAt": entry.get("transcribedAt") if transcribed else None,
@@ -281,6 +347,14 @@ async def transcribe_pending(
             _log(workspace, "SKIP", f"{rel} — already transcribed (hash match)")
             continue
 
+        partial_parts = _load_partial_parts(prior, content_hash)
+        if partial_parts and not (prior.get("contentHash") == content_hash and transcript.is_file()):
+            _log(
+                workspace,
+                "RESUME",
+                f"{rel} — {len(partial_parts)} chunk(s) saved from prior run",
+            )
+
         try:
             size = fp.stat().st_size
         except OSError:
@@ -313,6 +387,9 @@ async def transcribe_pending(
                     language=language,
                     workspace=workspace,
                     rel=rel,
+                    content_hash=content_hash,
+                    manifest=manifest,
+                    entries=entries,
                     on_event=on_event,
                     should_cancel=should_cancel,
                 )

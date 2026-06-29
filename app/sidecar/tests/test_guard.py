@@ -138,6 +138,32 @@ def test_heartbeat_fires_on_timeout(tmp_path: Path, monkeypatch):
     assert beats
 
 
+def test_guard_emits_heartbeat_during_long_await(tmp_path: Path, monkeypatch):
+    ws = tmp_path / "project"
+    ws.mkdir()
+    monkeypatch.setattr(guard, "GUARD_HEARTBEAT_SEC", 0.05)
+    monkeypatch.setattr(guard, "GUARD_RETRY_BASE_DELAY_SEC", 0.0)
+    beats: list[str] = []
+
+    async def slow():
+        await asyncio.sleep(0.2)
+        return "ok"
+
+    result = asyncio.run(
+        run_guarded(
+            slow,
+            label="slow",
+            scope="test",
+            workspace=ws,
+            timeout_sec=1.0,
+            retries=0,
+            heartbeat=beats.append,
+        )
+    )
+    assert result == "ok"
+    assert beats  # at least one in-progress heartbeat
+
+
 def test_workspace_none_still_guards(monkeypatch):
     monkeypatch.setattr(guard, "GUARD_RETRY_BASE_DELAY_SEC", 0.0)
     monkeypatch.setattr(guard, "GUARD_RETRY_MAX_DELAY_SEC", 0.0)

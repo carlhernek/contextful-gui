@@ -1057,6 +1057,67 @@ pub fn list_meta_dir(install: &Path, id: &str, rel_path: &str) -> Result<Vec<Met
     Ok(out)
 }
 
+/// Strip a trailing `` (N)`` copy suffix from a file stem (browser-style).
+fn strip_copy_suffix(stem: &str) -> &str {
+    let Some(idx) = stem.rfind(" (") else {
+        return stem;
+    };
+    let rest = &stem[idx + 2..];
+    if !rest.ends_with(')') {
+        return stem;
+    }
+    let num = &rest[..rest.len() - 1];
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return stem;
+    }
+    &stem[..idx]
+}
+
+/// Pick a destination filename that does not collide in ``dest_dir``.
+///
+/// If ``name`` is free it is returned unchanged; otherwise the smallest unused
+/// ``base (N).ext`` is chosen (same convention as browser download managers).
+pub fn unique_upload_name(dest_dir: &Path, name: &str) -> String {
+    if !dest_dir.join(name).exists() {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let ext = path.extension().and_then(|e| e.to_str());
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let base = strip_copy_suffix(stem);
+    for n in 1..10_000 {
+        let candidate = if let Some(e) = ext {
+            if e.is_empty() {
+                format!("{base} ({n})")
+            } else {
+                format!("{base} ({n}).{e}")
+            }
+        } else {
+            format!("{base} ({n})")
+        };
+        if !dest_dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    // Pathological: thousands of numbered copies already present.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Some(e) = ext {
+        if e.is_empty() {
+            format!("{base} ({stamp})")
+        } else {
+            format!("{base} ({stamp}).{e}")
+        }
+    } else {
+        format!("{base} ({stamp})")
+    }
+}
+
 pub fn upload_meta_files(
     install: &Path,
     id: &str,
@@ -1083,12 +1144,13 @@ pub fn upload_meta_files(
         if !meta_upload_allowed(name) {
             bail!("unsupported file type: {name}");
         }
-        let dest = dest_dir.join(name);
+        let dest_name = unique_upload_name(&dest_dir, name);
+        let dest = dest_dir.join(&dest_name);
         fs::copy(src_path, &dest).with_context(|| format!("copy {src}"))?;
         copied.push(if dest_rel_path.is_empty() {
-            name.to_string()
+            dest_name.clone()
         } else {
-            format!("{dest_rel_path}/{name}")
+            format!("{dest_rel_path}/{dest_name}")
         });
     }
     Ok(copied)
@@ -2042,6 +2104,57 @@ mod tests {
         let uploaded = upload_meta_files(install, "p1", &[src.to_string_lossy().to_string()], "specs").unwrap();
         assert_eq!(uploaded, vec!["specs/req.md"]);
         assert!(project.join("meta/specs/req.md").exists());
+    }
+
+    #[test]
+    fn unique_upload_name_adds_numbered_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        assert_eq!(unique_upload_name(dir, "clip.wav"), "clip.wav");
+        fs::write(dir.join("clip.wav"), b"x").unwrap();
+        assert_eq!(unique_upload_name(dir, "clip.wav"), "clip (1).wav");
+        fs::write(dir.join("clip (1).wav"), b"y").unwrap();
+        assert_eq!(unique_upload_name(dir, "clip.wav"), "clip (2).wav");
+    }
+
+    #[test]
+    fn upload_meta_files_disambiguates_duplicate_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path();
+        let project = install.join("projects/p1");
+        write_minimal_meta(&project, "P1");
+        fs::create_dir_all(project.join("meta/audio")).unwrap();
+        let first = tmp.path().join("chunk.wav");
+        let second = tmp.path().join("other/chunk.wav");
+        fs::create_dir_all(second.parent().unwrap()).unwrap();
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+        let uploaded = upload_meta_files(
+            install,
+            "p1",
+            &[
+                first.to_string_lossy().to_string(),
+                second.to_string_lossy().to_string(),
+            ],
+            "audio",
+        )
+        .unwrap();
+        assert_eq!(uploaded, vec!["audio/chunk.wav", "audio/chunk (1).wav"]);
+        assert!(project.join("meta/audio/chunk.wav").exists());
+        assert!(project.join("meta/audio/chunk (1).wav").exists());
+
+        // Third upload of the same basename picks the next free slot.
+        let third = tmp.path().join("again/chunk.wav");
+        fs::create_dir_all(third.parent().unwrap()).unwrap();
+        fs::write(&third, b"c").unwrap();
+        let more = upload_meta_files(
+            install,
+            "p1",
+            &[third.to_string_lossy().to_string()],
+            "audio",
+        )
+        .unwrap();
+        assert_eq!(more, vec!["audio/chunk (2).wav"]);
     }
 
     #[test]
